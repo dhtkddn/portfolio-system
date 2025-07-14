@@ -1,0 +1,28 @@
+# Core
+python==3.11.*
+pandas
+numpy
+sqlalchemy
+psycopg2
+scikit-learn
+cvxpy
+pyportfolioopt
+python-dotenv
+tenacity
+aiohttp
+httpx
+pydantic
+fastapi
+uvicorn
+
+# LLM 연동
+clova-x-langchain  # HyperCLOVA X 연동을 위한 가정용 래퍼
+
+# ETL용
+pykrx
+dart-fss
+yfinance
+
+# Airflow
+apache-airflow==2.9.*
+apache-airflow-providers-postgres
