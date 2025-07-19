@@ -1,4 +1,4 @@
-"""AI 에이전트 서비스 - RAG 기반 지능형 투자 상담."""
+"""AI 에이전트 서비스 - RAG 기반 지능형 투자 상담 (순환 import 해결)."""
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +15,7 @@ from app.services.models import (
     FinancialAnalysisResponse,
     ConversationMessage
 )
-from app.services.portfolio import _call_hcx_async
+from app.services.hyperclova_client import _call_hcx_async
 from app.services.stock_database import StockDatabase
 from utils.db import SessionLocal
 from sqlalchemy import text
