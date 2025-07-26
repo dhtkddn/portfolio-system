@@ -1,0 +1,28 @@
+name: portfolio
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pandas
+  - numpy
+  - sqlalchemy
+  - psycopg2
+  - yfinance
+  - scikit-learn
+  - cvxpy
+  - pyportfolioopt
+  - fastapi
+  - uvicorn
+  - httpx
+  - pydantic
+  - apache-airflow=2.9.*
+  - apache-airflow-providers-postgres
+  - python-dotenv
+  - tenacity
+  - aiohttp
+  - pip
+  - pip:
+      - clova-x-langchain        # HyperCLOVA 래퍼 (가정)
+      - pykrx
+      - dart-fss
