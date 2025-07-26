@@ -26,9 +26,10 @@ class MessageIntentAnalyzer:
         
         # 재무제표 관련 키워드  
         self.financial_keywords = [
-            "재무제표", "매출", "영업이익", "당기순이익", "부채비율", "ROE", "ROA",
+            "재무제표", "재무", "매출", "영업이익", "당기순이익", "부채비율", "ROE", "ROA",
             "PER", "PBR", "EPS", "재무분석", "실적", "손익계산서", "대차대조표",
-            "비교", "분석", "실적비교", "재무비교", "vs", "대비"
+            "비교", "분석", "실적비교", "재무비교", "vs", "대비", "알려달라", "제공해줘",
+            "보여줘", "알려줘", "분석해줘", "어때", "어떤지"
         ]
         
         # 시장 분석 키워드
@@ -53,11 +54,17 @@ class MessageIntentAnalyzer:
         market_score = self._calculate_keyword_score(message_lower, self.market_keywords)
         basic_score = self._calculate_keyword_score(message_lower, self.basic_keywords)
         
+        # 기업명이 포함된 경우 재무제표 분석 가능성 높임
+        company_keywords = ["삼성전자", "삼성", "sk하이닉스", "하이닉스", "네이버", "현대차", "lg화학", "셀트리온"]
+        has_company = any(company in message_lower for company in company_keywords)
+        if has_company and any(fin_keyword in message_lower for fin_keyword in ["재무", "실적", "분석"]):
+            financial_score += 50  # 기업명 + 재무 키워드 조합에 높은 점수
+        
         # 메시지 길이 고려 (긴 메시지일수록 기술적 분석 가능성 높음)
         length_factor = min(len(message) / 50, 2.0)  # 최대 2배
         
         # 질문 형태 확인
-        is_question = any(q in message_lower for q in ["?", "？", "어떻", "뭐", "언제", "어디", "왜", "어떡"])
+        is_question = any(q in message_lower for q in ["?", "？", "어떻", "뭐", "언제", "어디", "왜", "어떡", "알려달라", "제공해줘"])
         
         # 의도 결정
         intent_scores = {
@@ -70,7 +77,7 @@ class MessageIntentAnalyzer:
         max_score = max(intent_scores.values())
         primary_intent = max(intent_scores, key=intent_scores.get)
         
-        # 임계값 설정 (너무 낮으면 기본 대화로 처리)
+        # 임계값 설정 (재무제표 요청의 경우 더 낮은 임계값 사용)
         confidence = max_score / 10.0 if max_score > 0 else 0
         
         return {
@@ -78,7 +85,7 @@ class MessageIntentAnalyzer:
             "confidence": confidence,
             "scores": intent_scores,
             "is_question": is_question,
-            "needs_technical_analysis": confidence > 0.3 and primary_intent != "basic",
+            "needs_technical_analysis": confidence > 0.2 and primary_intent != "basic",  # 임계값 낮춤
             "message_length": len(message)
         }
     
@@ -650,6 +657,31 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
             # 여러 종목 비교
             comparison_data = await stock_database.compare_financials(tickers)
             
+            # 데이터 가용성 확인
+            if not comparison_data or "데이터가 없습니다" in str(comparison_data):
+                # 실제 기업명 찾기
+                company_names = []
+                for ticker in tickers:
+                    company_info = stock_database.get_company_info(ticker)
+                    company_names.append(company_info.get('company_name', ticker))
+                
+                return {
+                    "message": f"""죄송합니다. {', '.join(company_names)} 중 일부 기업의 재무 데이터가 현재 데이터베이스에 없습니다.
+
+**현재 상황:**
+- 재무데이터 수집이 진행 중입니다 (DART API 활용)
+- 곧 더 많은 기업의 재무제표를 이용할 수 있을 예정입니다
+
+**당장 이용 가능한 방법:**
+1. 🏢 각 기업의 공식 IR 페이지 방문
+2. 📊 금융감독원 전자공시시스템(DART) 활용
+3. 🔍 증권사 리서치 보고서 참고
+4. 📈 네이버금융, 인베스팅닷컴 등 금융정보 사이트 이용
+
+시스템 개선 중이니 잠시 후 다시 시도해주세요.""",
+                    "data_source": "Limited data availability"
+                }
+            
             prompt = f"""
 재무제표 비교 분석 요청입니다.
 
@@ -669,21 +701,96 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
             financial_data = stock_database.get_financials(ticker)
             company_info = stock_database.get_company_info(ticker)
             
+            # 데이터가 없거나 비어있는 경우 즉시 응답
+            if not financial_data or not any(financial_data.values()):
+                company_name = company_info.get('company_name', ticker) if company_info else ticker
+                return {
+                    "message": f"""죄송합니다. {company_name}({ticker})의 재무 데이터가 현재 데이터베이스에 없습니다.
+
+**현재 상황:**
+- 재무데이터 수집이 진행 중입니다 (DART API 활용)
+- 곧 더 많은 기업의 재무제표를 이용할 수 있을 예정입니다
+
+**당장 이용 가능한 방법:**
+1. 🏢 {company_name} 공식 IR 페이지 방문
+2. 📊 금융감독원 전자공시시스템(DART)에서 '{company_name}' 검색
+3. 🔍 증권사 리서치 보고서 참고
+4. 📈 네이버금융, 인베스팅닷컴 등에서 '{ticker}' 검색
+
+시스템 개선 중이니 잠시 후 다시 시도해주세요.""",
+                    "data_source": "Limited data availability"
+                }
+            
+            # 연도별 재무 데이터 수집
+            multi_year_data = stock_database.get_multi_year_financials(ticker)
+            
+            if not multi_year_data:
+                # 폴백: 단일 년도 데이터
+                revenue = financial_data.get('revenue', 0)
+                operating_profit = financial_data.get('operating_profit', 0) 
+                net_profit = financial_data.get('net_profit', 0)
+                roe = financial_data.get('ROE', 0)
+                latest_year = financial_data.get('latest_year', 2023)
+                
+                multi_year_summary = f"**{latest_year}년 단일 데이터**\n- 매출액: {revenue:,.0f}원 ({revenue/1000000000000:.1f}조원)"
+            else:
+                # 연도별 데이터 포맷팅 (최신순)
+                multi_year_summary = "**연도별 재무 성과 추이 (최신 3개년)**\n"
+                for i, year_data in enumerate(multi_year_data):
+                    year = year_data['year']
+                    rev = year_data['revenue']
+                    op = year_data['operating_profit'] 
+                    net = year_data['net_profit']
+                    
+                    # 전년 대비 증감률 계산
+                    growth_info = ""
+                    if i < len(multi_year_data) - 1:
+                        prev_year_data = multi_year_data[i + 1]
+                        revenue_growth = ((rev - prev_year_data['revenue']) / prev_year_data['revenue']) * 100
+                        growth_info = f" (매출 전년대비 {revenue_growth:+.1f}%)"
+                    
+                    multi_year_summary += f"- **{year}년**: 매출 {rev/1000000000000:.1f}조원, 영업이익 {op/1000000000000:.1f}조원, 순이익 {net/1000000000000:.1f}조원{growth_info}\n"
+                
+                # 최신 년도 데이터를 기본값으로 사용
+                latest_data = multi_year_data[0]  # 첫 번째가 최신
+                revenue = latest_data['revenue']
+                operating_profit = latest_data['operating_profit']
+                net_profit = latest_data['net_profit']
+                roe = (net_profit / revenue * 100) if revenue > 0 else 0
+                latest_year = latest_data['year']
+            
             prompt = f"""
-종목: {company_info.get('company_name', ticker)} ({ticker})
-섹터: {company_info.get('sector', '기타')}
+**{company_info.get('company_name', f'종목 {ticker}')}({ticker}) 재무제표 분석**
 
-재무 데이터:
-- 매출액: {financial_data.get('revenue', 0):,}원
-- 영업이익: {financial_data.get('operating_profit', 0):,}원
-- 당기순이익: {financial_data.get('net_profit', 0):,}원
-- ROE: {financial_data.get('ROE', 0):.1f}%
+## 기업 개요
+- 종목: {company_info.get('company_name', f'종목 {ticker}')} ({ticker})
+- 섹터: {company_info.get('sector', '기타')}
 
+## 📊 연도별 재무 데이터
+{multi_year_summary}
+
+## 📈 최신 재무 지표 ({latest_year}년 기준)
+- **매출액**: {revenue:,.0f}원 ({revenue/1000000000000:.1f}조원)
+- **영업이익**: {operating_profit:,.0f}원 ({operating_profit/1000000000000:.1f}조원)
+- **당기순이익**: {net_profit:,.0f}원 ({net_profit/1000000000000:.1f}조원)
+- **ROE (자기자본이익률)**: {roe:.1f}%
+- **영업이익률**: {(operating_profit/revenue*100):.1f}% (영업이익/매출액)
+
+## 📈 분석 요청
 사용자 질문: "{message}"
 
-위 재무 데이터를 바탕으로 이 기업의 재무 상태를 상세히 분석해주세요.
-재무 건전성, 수익성, 성장성 등을 종합적으로 평가하고,
-투자 관점에서의 의견을 제시해주세요.
+위의 **연도별 실제 재무 데이터**를 바탕으로 {company_info.get('company_name', f'종목 {ticker}')}의 재무 상태를 구체적으로 분석해주세요:
+
+1. **연도별 트렌드 분석**: 제시된 3개년(2021-2023) 매출과 이익의 변화 패턴
+2. **수익성 분석**: 최신 매출액 {revenue/1000000000000:.1f}조원, 영업이익 {operating_profit/1000000000000:.1f}조원의 의미
+3. **효율성 분석**: ROE {roe:.1f}%와 영업이익률 {(operating_profit/revenue*100):.1f}%의 해석
+4. **성장성 평가**: 연도별 성장률과 미래 전망
+5. **투자 관점**: 위 수치들을 종합한 투자 의견
+
+**중요사항**:
+- 제공된 구체적인 연도별 숫자들을 정확히 인용해주세요
+- 2024년 데이터는 수집 중이므로 2021-2023년 3개년 트렌드를 분석해주세요
+- 각 연도의 수치를 정확히 구분하여 분석해주세요
 """
             
         else:
@@ -850,10 +957,10 @@ def _create_postgresql_based_prompt(
     else:
         market_analysis = f"AI가 최적의 분산을 위해 코스피 {market_dist.get('KOSPI', 0)}개, 코스닥 {market_dist.get('KOSDAQ', 0)}개 종목을 선별했습니다."
     
-    # 포트폴리오 구성 설명
+    # 포트폴리오 구성 설명 (재무데이터 포함)
     portfolio_composition = ""
     if weights:
-        portfolio_composition = "\n**📊 선별된 종목 구성:**\n"
+        portfolio_composition = "\n**📊 선별된 종목 구성 및 재무 현황:**\n"
         for ticker, data in weights.items():
             company_name = data.get("name", ticker)
             weight = data.get("weight", 0)
@@ -861,10 +968,29 @@ def _create_postgresql_based_prompt(
             market = data.get("market", "Unknown")
             revenue = data.get("revenue")
             
-            portfolio_composition += f"- **{company_name} ({ticker})**: {weight:.1%} - {sector} ({market})"
-            if revenue:
-                portfolio_composition += f" - 매출 {revenue/100000000:.0f}억원"
-            portfolio_composition += "\n"
+            # 종목 코드에서 .KS/.KQ 제거
+            clean_ticker = ticker.replace('.KS', '').replace('.KQ', '')
+            
+            portfolio_composition += f"- **{company_name} ({clean_ticker})**: {weight:.1%} - {sector} ({market})\n"
+            
+            # 실제 재무데이터 조회 및 추가
+            try:
+                from app.services.stock_database import stock_database
+                financial_data = stock_database.get_multi_year_financials(clean_ticker)
+                if financial_data and len(financial_data) > 0:
+                    latest_data = financial_data[0]  # 최신년도 데이터
+                    revenue = latest_data.get('revenue', 0)
+                    op_profit = latest_data.get('operating_profit', 0)
+                    net_profit = latest_data.get('net_profit', 0)
+                    year = latest_data.get('year', 0)
+                    
+                    portfolio_composition += f"  - {year}년 매출: {revenue/1000000000000:.1f}조원, 영업이익: {op_profit/1000000000000:.1f}조원, 순이익: {net_profit/1000000000000:.1f}조원\n"
+                else:
+                    if revenue:
+                        portfolio_composition += f"  - 추정 매출: {revenue/1000000000000:.1f}조원\n"
+            except Exception as e:
+                if revenue:
+                    portfolio_composition += f"  - 추정 매출: {revenue/1000000000000:.1f}조원\n"
     
     # 섹터 분포
     sector_dist = portfolio_details.get("portfolio_stats", {}).get("sector_distribution", {})
@@ -992,44 +1118,165 @@ async def _extract_tickers_from_company_names(message: str) -> List[str]:
     tickers = []
     message_lower = message.lower()
     
-    # 주요 기업 그룹별 키워드 정의
-    company_patterns = {
-        # 삼성 그룹
-        'samsung|삼성전자': ['Samsung Electronics'],
-        'samsung|삼성': ['Samsung'],
-        # SK 그룹  
-        'sk.*hynix|하이닉스': ['SK hynix', 'hynix'],
-        'sk': ['SK'],
-        # LG 그룹
-        'lg.*chem|lg화학': ['LG Chem'],
-        'lg.*display|lg디스플레이': ['LG Display'], 
-        'lg': ['LG'],
-        # 현대 그룹
-        'hyundai.*motor|현대차': ['Hyundai Motor'],
-        'hyundai|현대': ['Hyundai', 'HD Hyundai'],
-        # 기타 주요 기업들
-        'naver|네이버': ['NAVER'],
-        'kakao|카카오': ['Kakao'],
-        'celltrion|셀트리온': ['Celltrion'],
-        'posco|포스코': ['POSCO']
-    }
-    
     session = SessionLocal()
     try:
+        # 특정 기업 직접 매핑 (확실한 매칭) - 확대된 목록
+        direct_mappings = {
+            '삼성전자': '005930',
+            '삼성': '005930', 
+            'samsung': '005930',
+            'sk하이닉스': '000660',
+            '하이닉스': '000660', 
+            'hynix': '000660',
+            '네이버': '035420',
+            'naver': '035420',
+            '현대차': '005380',
+            '현대자동차': '005380',
+            'lg화학': '051910',
+            '셀트리온': '068270',
+            'celltrion': '068270',
+            '안랩': '053800',
+            'ahnlab': '053800',
+            # 추가 매핑
+            '에스오일': '010950',
+            's-oil': '010950',
+            '에코프로비엠': '247540',
+            '에코프로': '086520',
+            'ecopro': '086520',
+            '카카오': '035720',
+            'kakao': '035720',
+            '카카오게임즈': '293490',
+            '포스코': '005490',
+            'posco': '005490',
+            '기아': '000270',
+            'kia': '000270',
+            '한국전력': '015760',
+            '한전': '015760',
+            'kepco': '015760',
+            '신한지주': '055550',
+            '하나금융': '086790',
+            'kb금융': '105560',
+            '두산': '000150',
+            'doosan': '000150'
+        }
+        
+        # 직접 매핑 먼저 확인
+        logger.info(f"🔍 회사명 매핑 시도: '{message_lower}'")
+        
+        for keyword, ticker in direct_mappings.items():
+            if keyword in message_lower:
+                logger.info(f"🎯 키워드 매칭: '{keyword}' -> {ticker}")
+                
+                # 해당 ticker가 DB에 있는지 확인
+                result = session.execute(text("""
+                    SELECT ticker, corp_name 
+                    FROM company_info 
+                    WHERE ticker = :ticker
+                """), {"ticker": ticker}).fetchone()
+                
+                if result:
+                    tickers.append(result[0])
+                    logger.info(f"🎯 직접 매핑: {result[1]} ({result[0]})")
+                    return list(set(tickers))  # 중복 제거
+                else:
+                    logger.warning(f"⚠️ DB에서 {ticker} 찾을 수 없음")
+        
+        logger.warning(f"🚫 직접 매핑 실패: '{message_lower}'에서 알려진 회사 없음")
+        
+        # 🔥 DB에서 동적 회사명 검색 (전체 826개 기업 대상)
+        logger.info("🔍 DB에서 동적 회사명 검색 시작")
+        
+        # 메시지에서 키워드 추출 (한글 + 영어)
+        import re
+        korean_words = re.findall(r'[가-힣]{2,}', message_lower)
+        english_words = re.findall(r'[a-z]{3,}', message_lower)
+        all_keywords = korean_words + english_words
+        logger.info(f"🔍 추출된 키워드: 한글={korean_words}, 영어={english_words}")
+        
+        for word in all_keywords:
+            if len(word) >= 2:  # 2글자 이상만
+                # 회사명에서 해당 키워드 검색 (더 정확한 매칭)
+                # 한글 키워드에 대한 특별 처리
+                if word and all(ord(ch) >= 0xAC00 and ord(ch) <= 0xD7A3 for ch in word):
+                    # 한글인 경우 - 일반적인 영문 변환 시도
+                    search_keywords = [word]
+                    # 공백 제거 버전도 추가
+                    if ' ' in word:
+                        search_keywords.append(word.replace(' ', ''))
+                else:
+                    # 영문인 경우 - 대소문자 무시
+                    search_keywords = [word.lower(), word.upper(), word.capitalize()]
+                
+                for search_word in search_keywords:
+                    search_result = session.execute(text("""
+                        SELECT ci.ticker, ci.corp_name, 
+                               CASE 
+                                   WHEN ci.corp_name LIKE :exact_match THEN 1
+                                   WHEN ci.corp_name LIKE :keyword THEN 2
+                                   ELSE 3
+                               END as priority
+                        FROM company_info ci
+                        JOIN financials f ON ci.ticker = f.ticker
+                        WHERE ci.corp_name LIKE :keyword
+                           OR REPLACE(LOWER(ci.corp_name), ' ', '') LIKE :keyword_no_space
+                           OR REPLACE(LOWER(ci.corp_name), '.', '') LIKE :keyword_no_dot
+                           OR REPLACE(LOWER(ci.corp_name), ',', '') LIKE :keyword_no_comma
+                        GROUP BY ci.ticker, ci.corp_name
+                        ORDER BY priority, ci.corp_name
+                        LIMIT 3
+                    """), {
+                        "keyword": f"%{search_word}%",
+                        "exact_match": f"{search_word}%",
+                        "keyword_no_space": f"%{search_word.replace(' ', '')}%",
+                        "keyword_no_dot": f"%{search_word.replace('.', '')}%",
+                        "keyword_no_comma": f"%{search_word.replace(',', '')}%"
+                    }).fetchall()
+                    
+                    if search_result:
+                        break
+                
+                if search_result:
+                    logger.info(f"🎯 동적 검색 성공: '{word}' -> {len(search_result)}개 매칭")
+                    for result in search_result:
+                        tickers.append(result[0])
+                        logger.info(f"🎯 동적 매핑: {result[1]} ({result[0]}) - 우선순위 {result[2]}")
+                    return list(set(tickers))  # 중복 제거
+        
+        # 직접 매핑에서 못 찾은 경우 패턴 매칭
+        company_patterns = {
+        # 삼성 그룹
+        'samsung.*c&t|삼성물산': ['Samsung C&T'],
+        # SK 그룹  
+        'sk.*hynix': ['SK hynix', 'hynix'],
+        'sk': ['SK'],
+        # LG 그룹
+        'lg.*chem': ['LG Chem'],
+        'lg.*display': ['LG Display'], 
+        'lg': ['LG'],
+        # 현대 그룹
+        'hyundai.*motor': ['Hyundai Motor'],
+        'hyundai': ['Hyundai', 'HD Hyundai'],
+        # 두산 그룹
+        'doosan.*ener|두산에너빌리티': ['Doosan Enerbility'],
+        'doosan|두산': ['Doosan'],
+        # 기타 주요 기업들
+        'kakao|카카오': ['Kakao'],
+        'posco|포스코': ['POSCO']
+    }
+        
         # 패턴별로 매칭 확인
         for pattern, search_terms in company_patterns.items():
             if re.search(pattern, message_lower):
                 for term in search_terms:
                     result = session.execute(text("""
-                        SELECT DISTINCT ticker, corp_name 
-                        FROM company_info 
-                        WHERE corp_name ILIKE :term
-                        ORDER BY 
+                        SELECT ticker, corp_name,
                             CASE 
                                 WHEN corp_name ILIKE :exact_term THEN 1
                                 ELSE 2 
-                            END,
-                            corp_name
+                            END as priority
+                        FROM company_info 
+                        WHERE corp_name ILIKE :term
+                        ORDER BY priority, corp_name
                         LIMIT 3
                     """), {"term": f"%{term}%", "exact_term": f"{term}%"})
                     
@@ -1048,15 +1295,14 @@ async def _extract_tickers_from_company_names(message: str) -> List[str]:
             for word in words:
                 if len(word) >= 2:
                     result = session.execute(text("""
-                        SELECT DISTINCT ticker, corp_name 
-                        FROM company_info 
-                        WHERE corp_name ILIKE :word
-                        ORDER BY 
+                        SELECT ticker, corp_name,
                             CASE 
                                 WHEN corp_name ILIKE :exact_word THEN 1
                                 ELSE 2 
-                            END,
-                            corp_name
+                            END as priority
+                        FROM company_info 
+                        WHERE corp_name ILIKE :word
+                        ORDER BY priority, corp_name
                         LIMIT 2
                     """), {"word": f"%{word}%", "exact_word": f"{word}%"})
                     

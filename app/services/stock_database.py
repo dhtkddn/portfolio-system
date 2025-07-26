@@ -527,6 +527,37 @@ class StockDatabase:
         year_ago = float(hist_data['Close'].iloc[0])
         return ((current - year_ago) / year_ago) * 100
 
+    def get_multi_year_financials(self, ticker: str) -> List[Dict]:
+        """종목의 연도별 재무 정보를 PostgreSQL에서 조회 (4년간)"""
+        try:
+            query = """
+            SELECT year, "매출액", "영업이익", "당기순이익"
+            FROM financials 
+            WHERE ticker = :ticker 
+              AND year <= 2023
+            ORDER BY year DESC
+            LIMIT 3
+            """
+            result = self.session.execute(text(query), {"ticker": ticker})
+            rows = result.fetchall()
+            
+            multi_year_data = []
+            for row in rows:
+                if row[1] and row[2] and row[3]:  # 모든 데이터가 있는 경우만
+                    multi_year_data.append({
+                        "year": row[0],
+                        "revenue": row[1],
+                        "operating_profit": row[2],
+                        "net_profit": row[3]
+                    })
+            
+            logger.info(f"📊 {ticker} 연도별 재무데이터: {len(multi_year_data)}개년")
+            return multi_year_data
+            
+        except Exception as e:
+            logger.error(f"연도별 재무 데이터 조회 실패 {ticker}: {e}")
+            return []
+
     def close(self):
         if self.session:
             self.session.close()

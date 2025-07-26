@@ -44,12 +44,12 @@ def _get_test_corps(tickers: List[str]) -> List:
     test_corps = []
     
     try:
-        # 전체 기업 리스트 가져오기
-        all_corps = dart.get_corp_list(market="KOSPI") + dart.get_corp_list(market="KOSDAQ")
+        # 전체 기업 리스트 가져오기 (새 API 문법)
+        all_corps = dart.get_corp_list()
         
         # 테스트 종목에 해당하는 기업만 필터링
         for corp in all_corps:
-            if corp.stock_code in tickers:
+            if hasattr(corp, 'stock_code') and corp.stock_code in tickers:
                 test_corps.append(corp)
                 logger.info(f"✅ Found corp: {corp.corp_name} ({corp.stock_code})")
         
@@ -165,7 +165,7 @@ def run(
                     return
         else:
             # 전체 모드: 모든 기업
-            corps = dart.get_corp_list(market="KOSPI") + dart.get_corp_list(market="KOSDAQ")
+            corps = dart.get_corp_list()
 
         # 실제 DART 데이터 수집
         for i, corp in enumerate(corps, 1):

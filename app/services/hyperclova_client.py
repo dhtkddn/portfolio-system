@@ -55,7 +55,9 @@ async def _call_hcx_api(messages: List[Dict[str, str]]) -> str:
     }
 
     try:
-        async with aiohttp.ClientSession() as session:
+        # SSL 검증 비활성화를 위한 connector 생성
+        connector = aiohttp.TCPConnector(ssl=False)
+        async with aiohttp.ClientSession(connector=connector) as session:
             async with session.post(
                 API_URL, 
                 headers=headers, 
@@ -245,7 +247,10 @@ async def get_hyperclova_response(prompt: Union[str, List[Dict[str, str]]]) -> s
     try:
         content = await _call_hcx_api(messages)
         if content and len(content) > 100:
-            return content
+            # 중복 응답 제거 및 포맷팅
+            cleaned_content = _remove_duplicate_response(content)
+            formatted_content = _format_response_text(cleaned_content)
+            return formatted_content
         else:
             # 빈 응답이거나 너무 짧은 경우 모의 응답으로 대체
             logger.warning("빈 응답 또는 너무 짧은 응답으로 인해 모의 응답으로 대체합니다.")
@@ -267,10 +272,138 @@ async def _call_hcx_async(messages: List[Dict[str, str]]) -> str:
         return _generate_enhanced_mock_response(messages)
 
 
-def _format_response_text(text: str) -> str:
-    """AI 응답 텍스트 포맷팅 개선"""
+def _remove_duplicate_response(text: str) -> str:
+    """중복된 응답 제거 - 매우 강화된 버전"""
     if not text:
         return text
+    
+    # 텍스트가 너무 짧으면 중복 체크 안함
+    if len(text) < 200:
+        return text
+    
+    # 방법 1: 정확히 반으로 나누어 체크
+    half_length = len(text) // 2
+    first_half = text[:half_length].strip()
+    second_half = text[half_length:].strip()
+    
+    # 완전 동일한 경우
+    if first_half == second_half:
+        logger.info("🔧 완전 중복 응답 감지 및 제거 (완전일치)")
+        return first_half
+    
+    # 방법 2: 90% 이상 유사한 경우 (더 관대한 중복 검출)
+    if len(first_half) > 100 and len(second_half) > 100:
+        # 문자열 유사도 계산 (간단한 방법)
+        shorter = min(len(first_half), len(second_half))
+        longer = max(len(first_half), len(second_half))
+        common_chars = sum(1 for i in range(min(len(first_half), len(second_half))) 
+                          if i < len(first_half) and i < len(second_half) and first_half[i] == second_half[i])
+        
+        similarity = common_chars / longer if longer > 0 else 0
+        if similarity > 0.8:  # 80% 이상 유사하면 중복으로 판단
+            logger.info(f"🔧 유사도 기반 중복 응답 감지 및 제거 (유사도: {similarity:.2f})")
+            return first_half
+    
+    # 방법 3: 특정 패턴으로 나누어 체크 (더 정확)
+    # 재무제표 분석 관련 중복 패턴들
+    duplicate_patterns = [
+        r'삼성전자.*?의\s*재무\s*상태\s*분석',
+        r'[가-힣]+전자.*?재무\s*분석',
+        r'재무\s*상태.*?분석.*?진행',
+        r'포트폴리오.*?분석.*?결과',
+        r'투자.*?추천.*?드리겠습니다'
+    ]
+    
+    for pattern in duplicate_patterns:
+        matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
+        if len(matches) >= 2:
+            # 두 번째 패턴 이후 텍스트 제거
+            second_match_pos = text.find(matches[1])
+            if second_match_pos > 0:
+                logger.info(f"🔧 패턴 기반 중복 응답 감지 및 제거 (패턴: {pattern[:20]}...)")
+                return text[:second_match_pos].strip()
+    
+    # 방법 4: 문장별 중복 체크 (더 정밀)
+    sentences = re.split(r'[.!?]\s+', text)
+    if len(sentences) > 8:  # 충분한 문장이 있을 때만
+        # 문장들을 3등분하여 중복 체크
+        third_length = len(sentences) // 3
+        first_third = sentences[:third_length]
+        second_third = sentences[third_length:2*third_length]
+        last_third = sentences[2*third_length:]
+        
+        # 첫 번째와 두 번째 1/3이 비슷한지 체크
+        first_third_text = ' '.join(first_third)
+        second_third_text = ' '.join(second_third)
+        
+        # 키워드 기반 유사도 체크 (더 관대하게)
+        keywords = ['매출', '영업이익', '순이익', 'ROE', '분석', '투자', '재무', '포트폴리오', '종목', '기업']
+        first_keywords = sum(1 for kw in keywords if kw in first_third_text)
+        second_keywords = sum(1 for kw in keywords if kw in second_third_text)
+        
+        # 두 부분 모두 비슷한 키워드 밀도를 가지면 중복 의심
+        if first_keywords >= 3 and second_keywords >= 3 and abs(first_keywords - second_keywords) <= 2:
+            logger.info("🔧 문장 기반 중복 응답 감지 및 제거")
+            return first_third_text.strip()
+    
+    # 방법 5: 단어 반복 패턴 체크
+    # 같은 단어가 비정상적으로 많이 반복되는 경우
+    words = text.split()
+    word_count = {}
+    for word in words:
+        if len(word) > 2:  # 2글자 이상 단어만
+            word_count[word] = word_count.get(word, 0) + 1
+    
+    # 특정 단어가 비정상적으로 많이 반복되면 중복 의심
+    max_repeats = max(word_count.values()) if word_count else 0
+    total_words = len(words)
+    
+    if max_repeats > 10 and total_words > 100:  # 전체 단어 대비 특정 단어가 너무 많이 반복
+        # 가장 많이 반복된 단어 찾기
+        most_repeated_word = max(word_count.items(), key=lambda x: x[1])[0]
+        
+        # 해당 단어가 처음 등장하는 부분들을 찾아서 중복 체크
+        word_positions = [i for i, word in enumerate(words) if word == most_repeated_word]
+        
+        if len(word_positions) >= 6:  # 6번 이상 나타나면
+            # 중간 지점에서 잘라서 중복 제거
+            middle_pos = word_positions[len(word_positions) // 2]
+            first_part = ' '.join(words[:middle_pos])
+            logger.info(f"🔧 단어 반복 기반 중복 응답 감지 및 제거 (반복 단어: {most_repeated_word})")
+            return first_part.strip()
+    
+    return text
+
+def _format_response_text(text: str) -> str:
+    """AI 응답 텍스트 포맷팅 개선 - 사용자 피드백 반영"""
+    if not text:
+        return text
+    
+    # 🔥 핵심 문제 해결: 공백 + 숫자 + 공백 + 텍스트 패턴
+    # "분석 2 수익성" → "분석\n\n2. 수익성"
+    text = re.sub(r'([가-힣])\s+(\d+)\s+([가-힣A-Za-z])', r'\1\n\n\2. \3', text)
+    
+    # 🔥 문장 끝 + 공백 + 숫자 패턴 강화
+    # "됩니다 3 효율성" → "됩니다\n\n3. 효율성"
+    text = re.sub(r'(습니다|됩니다|입니다)\s+(\d+)\s+([가-힣A-Za-z])', r'\1\n\n\2. \3', text)
+    
+    # 🔥 단어 붙어있는 숫자 패턴
+    # "분석2수익성" → "분석\n\n2. 수익성"
+    text = re.sub(r'([가-힣])(\d+)([가-힣])', r'\1\n\n\2. \3', text)
+    
+    # 🔥 마크다운 헤더 완전 제거
+    text = re.sub(r'#{3,}\s*', '', text)
+    
+    # 🔥 이미 있는 "숫자." 형태도 줄바꿈 보장
+    text = re.sub(r'([^\n])(\d+\.\s*[가-힣A-Za-z])', r'\1\n\n\2', text)
+    
+    # 🔥 숫자. 다음에 바로 오는 한글에서 단어 구분 (더 정확하게)
+    # "1. 연도별트렌드분석" → "1. 연도별 트렌드 분석"  
+    text = re.sub(r'(\d+\.\s*)([가-힣]{2,3})([가-힣]{2,3})([가-힣]{2,})', r'\1\2 \3 \4', text)
+    
+    # 🔥 특수 케이스: 줄 끝에 숫자가 오는 경우
+    # "분석- 2 수익성" → "분석-\n\n2. 수익성"
+    text = re.sub(r'(-\s*)(\d+)\s+([가-힣A-Za-z])', r'\1\n\n\2. \3', text)
     
     # 🔥 제목과 본문 사이의 줄바꿈 처리 강화
     text = text.replace('방식안녕하세요', '방식\n\n안녕하세요')
@@ -278,19 +411,33 @@ def _format_response_text(text: str) -> str:
     text = text.replace('리포트안녕하세요', '리포트\n\n안녕하세요')
     text = text.replace('분석안녕하세요', '분석\n\n안녕하세요')
     
-    # 🔥 문단 구분 개선
+    # 재무제표 분석 특수 케이스
+    text = text.replace('분석을 진행하였습니다', '분석을 진행하였습니다\n')
+    text = text.replace('분석을 제시하겠습니다', '분석을 제시하겠습니다\n')
+    text = text.replace('분석 결과는 다음과 같습니다', '분석 결과는 다음과 같습니다\n')
+    
+    # 🔥 마크다운 리스트 포맷팅 개선
+    text = re.sub(r'(\d+)\.\s*([^\n]*)\n-', r'\1. **\2**\n  -', text)
+    
+    # 🔥 불필요한 마크다운 문법 정리
+    text = re.sub(r'\*\*([^*]+)\*\*:', r'**\1:**', text)
+    
+    # 🔥 문단 구분 개선 - 더 적극적으로
+    # 분석 섹션 구분
+    text = re.sub(r'([^\n])(\d+\.\s*[가-힣A-Za-z][^\n]*?분석)', r'\1\n\n\2', text)
+    text = re.sub(r'([^\n])(\d+\.\s*[가-힣A-Za-z][^\n]*?추이)', r'\1\n\n\2', text)
+    text = re.sub(r'([^\n])(\d+\.\s*[가-힣A-Za-z][^\n]*?변화)', r'\1\n\n\2', text)
+    
     # 제목 다음에 줄바꿈 추가
     text = re.sub(r'(리포트 - [^안]*)(안녕하세요)', r'\1\n\n\2', text)
     text = re.sub(r'(분석[^안]*)(안녕하세요)', r'\1\n\n\2', text)
     
-    # 문단 끝 마침표 다음에 적절한 간격
-    text = re.sub(r'(\.)([가-힣A-Z].*?께서)', r'\1\n\n\2', text)
-    text = re.sub(r'(습니다\.)([가-힣].*?포트폴리오)', r'\1\n\n\2', text)
-    text = re.sub(r'(습니다\.)([가-힣].*?종목)', r'\1\n\n\2', text)
-    text = re.sub(r'(습니다\.)([가-힣].*?투자)', r'\1\n\n\2', text)
-    text = re.sub(r'(습니다\.)([가-힣].*?분석)', r'\1\n\n\2', text)
+    # 문단 끝 마침표 다음에 적절한 간격 - 더 강화
+    text = re.sub(r'(습니다\.)([가-힣])', r'\1\n\n\2', text)
+    text = re.sub(r'(입니다\.)([가-힣])', r'\1\n\n\2', text)
+    text = re.sub(r'(됩니다\.)([가-힣])', r'\1\n\n\2', text)
     
-    # 특정 문단 구분점들
+    # 🔥 특정 문단 구분점들
     paragraph_breaks = [
         ('먼저,', '\n\n먼저,'),
         ('이러한 종목들', '\n\n이러한 종목들'),
@@ -300,17 +447,28 @@ def _format_response_text(text: str) -> str:
         ('종합적으로', '\n\n종합적으로'),
         ('이상으로', '\n\n이상으로'),
         ('마지막으로', '\n\n마지막으로'),
-        ('결론적으로', '\n\n결론적으로')
+        ('결론적으로', '\n\n결론적으로'),
+        # 재무제표 관련 추가
+        ('매출 및 이익', '\n\n매출 및 이익'),
+        ('수익성 지표', '\n\n수익성 지표'),
+        ('안정성 지표', '\n\n안정성 지표'),
+        ('성장성 분석', '\n\n성장성 분석'),
+        ('투자 의견', '\n\n투자 의견')
     ]
     
     for old, new in paragraph_breaks:
         text = text.replace(old, new)
     
-    # 🔥 중복된 줄바꿈 정리
-    text = re.sub(r'\n{3,}', '\n\n', text)
+    # 🔥 중복된 줄바꿈 정리 (하지만 너무 많이 제거하지 않음)
+    text = re.sub(r'\n{4,}', '\n\n\n', text)  # 4개 이상을 3개로
+    text = re.sub(r'\n{3}', '\n\n', text)  # 3개를 2개로
     
     # 🔥 시작과 끝 공백 정리
     text = text.strip()
+    
+    # 🔥 최종 검증 - 숫자 리스트가 제대로 포맷되었는지 확인
+    # 예: "분석1. 매출" -> "분석\n\n1. 매출"
+    text = re.sub(r'([가-힣])(\d+\.\s*[가-힣])', r'\1\n\n\2', text)
     
     return text
 
@@ -523,28 +681,36 @@ def _generate_enhanced_mock_response(messages: List[Dict[str, str]]) -> str:
 ※ 현재 HyperCLOVA API가 연결되면 더욱 정확한 분석을 제공할 수 있습니다.
 """.strip()
     
-    return f"""
-안녕하세요! 투자 상담 AI입니다.
+    # 재무제표 관련 질문인지 확인
+    if any(keyword in message_lower for keyword in ['재무제표', '재무', '비교', '분석', '실적']):
+        return f"""죄송합니다. 요청하신 재무제표 분석을 위한 데이터가 현재 제한적입니다.
 
-질문해주신 내용: {user_message}
+**데이터 현황:**
+- 현재 시스템에는 68개 주요 종목의 재무 데이터만 보유
+- 요청하신 기업들의 데이터가 없을 가능성이 높음
 
-현재 API 연결 문제로 인해 모의 모드로 동작하고 있지만, 일반적인 투자 원칙을 말씀드리겠습니다.
+**권장 방법:**
+1. 📊 금융감독원 전자공시시스템(DART) 이용
+2. 🏢 각 기업 공식 IR 페이지 확인  
+3. 🔍 증권사 리서치 보고서 참고
+4. 📈 네이버금융, 인베스팅닷컴 등 활용
 
-**기본 투자 원칙**
-1. 분산투자를 통한 위험 관리
-2. 장기 투자 관점 유지
-3. 정기적인 포트폴리오 점검
-4. 본인의 투자 성향에 맞는 종목 선택
+시스템 개선을 통해 더 많은 기업의 재무 데이터를 확보하도록 하겠습니다."""
+    
+    return f"""안녕하세요! MIRAE 포트폴리오 AI입니다.
 
-**투자자를 위한 일반적 조언**
-- 본인의 위험 수용 능력에 맞는 포트폴리오 구성
-- 시장 변동성에 대비한 적절한 현금 비중 유지
-- 감정적 판단보다 합리적 기준에 따른 투자 결정
+현재 HyperCLOVA API 연결 이슈로 제한된 서비스를 제공하고 있습니다.
 
-API 연결이 복구되면 더욱 정확한 맞춤형 분석을 제공해드리겠습니다.
+**이용 가능한 기능:**
+- 68개 주요 종목 포트폴리오 최적화
+- 삼성전자, SK하이닉스 등 주요 기업 재무분석
+- 투자 성향별 맞춤 포트폴리오 추천
 
-이상으로 상담을 마치겠습니다.
-""".strip()
+**질문 예시:**
+- "코스피 종목으로 안전한 포트폴리오 구성해줘"
+- "삼성전자와 SK하이닉스 비교분석"
+
+API 연결 복구 후 더 정확한 분석을 제공하겠습니다.""".strip()
 
 
 def _generate_mock_response(messages: List[Dict[str, str]]) -> str:
