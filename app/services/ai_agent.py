@@ -3,6 +3,7 @@
 import logging
 import re
 from typing import Dict, Any, Optional, List
+from sqlalchemy import text
 
 from app.schemas import PortfolioInput, AnalysisType, OptimizationMode
 from app.services.stock_database import StockDatabase
@@ -26,7 +27,8 @@ class MessageIntentAnalyzer:
         # 재무제표 관련 키워드  
         self.financial_keywords = [
             "재무제표", "매출", "영업이익", "당기순이익", "부채비율", "ROE", "ROA",
-            "PER", "PBR", "EPS", "재무분석", "실적", "손익계산서", "대차대조표"
+            "PER", "PBR", "EPS", "재무분석", "실적", "손익계산서", "대차대조표",
+            "비교", "분석", "실적비교", "재무비교", "vs", "대비"
         ]
         
         # 시장 분석 키워드
@@ -638,20 +640,8 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
     tickers = re.findall(ticker_pattern, message)
     
     if not tickers:
-        # 회사명으로 종목 찾기
-        company_keywords = {
-            "삼성전자": "005930",
-            "sk하이닉스": "000660", 
-            "네이버": "035420",
-            "현대차": "005380",
-            "lg화학": "051910",
-            "카카오": "035720"
-        }
-        
-        message_lower = message.lower()
-        for company, ticker in company_keywords.items():
-            if company in message_lower:
-                tickers.append(ticker)
+        # DB에서 동적으로 회사명 검색
+        tickers = await _extract_tickers_from_company_names(message)
     
     try:
         from app.services.stock_database import stock_database
@@ -994,6 +984,93 @@ async def get_stock_recommendations(message: str, user_profile: Dict) -> Dict[st
             "message": "추천 생성 중 오류가 발생했습니다.",
             "data_source": "PostgreSQL yfinance data"
         }
+
+async def _extract_tickers_from_company_names(message: str) -> List[str]:
+    """메시지에서 회사명을 추출하여 DB에서 해당 티커들을 찾기"""
+    from utils.db import SessionLocal
+    
+    tickers = []
+    message_lower = message.lower()
+    
+    # 주요 기업 그룹별 키워드 정의
+    company_patterns = {
+        # 삼성 그룹
+        'samsung|삼성전자': ['Samsung Electronics'],
+        'samsung|삼성': ['Samsung'],
+        # SK 그룹  
+        'sk.*hynix|하이닉스': ['SK hynix', 'hynix'],
+        'sk': ['SK'],
+        # LG 그룹
+        'lg.*chem|lg화학': ['LG Chem'],
+        'lg.*display|lg디스플레이': ['LG Display'], 
+        'lg': ['LG'],
+        # 현대 그룹
+        'hyundai.*motor|현대차': ['Hyundai Motor'],
+        'hyundai|현대': ['Hyundai', 'HD Hyundai'],
+        # 기타 주요 기업들
+        'naver|네이버': ['NAVER'],
+        'kakao|카카오': ['Kakao'],
+        'celltrion|셀트리온': ['Celltrion'],
+        'posco|포스코': ['POSCO']
+    }
+    
+    session = SessionLocal()
+    try:
+        # 패턴별로 매칭 확인
+        for pattern, search_terms in company_patterns.items():
+            if re.search(pattern, message_lower):
+                for term in search_terms:
+                    result = session.execute(text("""
+                        SELECT DISTINCT ticker, corp_name 
+                        FROM company_info 
+                        WHERE corp_name ILIKE :term
+                        ORDER BY 
+                            CASE 
+                                WHEN corp_name ILIKE :exact_term THEN 1
+                                ELSE 2 
+                            END,
+                            corp_name
+                        LIMIT 3
+                    """), {"term": f"%{term}%", "exact_term": f"{term}%"})
+                    
+                    for row in result:
+                        tickers.append(row[0])
+                        logger.info(f"🏢 매칭된 기업: {row[1]} ({row[0]})")
+                
+                # 첫 번째 매칭에서 결과를 찾으면 중단
+                if tickers:
+                    break
+        
+        # 직접적인 회사명 검색 (위에서 못 찾은 경우)
+        if not tickers:
+            # 메시지에서 한글/영문 기업명 추출
+            words = re.findall(r'[가-힣]{2,}|[A-Za-z]{2,}', message)
+            for word in words:
+                if len(word) >= 2:
+                    result = session.execute(text("""
+                        SELECT DISTINCT ticker, corp_name 
+                        FROM company_info 
+                        WHERE corp_name ILIKE :word
+                        ORDER BY 
+                            CASE 
+                                WHEN corp_name ILIKE :exact_word THEN 1
+                                ELSE 2 
+                            END,
+                            corp_name
+                        LIMIT 2
+                    """), {"word": f"%{word}%", "exact_word": f"{word}%"})
+                    
+                    for row in result:
+                        tickers.append(row[0])
+                        logger.info(f"🏢 검색된 기업: {row[1]} ({row[0]})")
+    
+    except Exception as e:
+        logger.error(f"회사명 추출 실패: {e}")
+    finally:
+        session.close()
+    
+    # 중복 제거
+    return list(set(tickers))
 
 if __name__ == "__main__":
     import asyncio

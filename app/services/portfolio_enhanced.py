@@ -72,7 +72,7 @@ class EnhancedStockScreener:
                 FROM company_info ci
                 INNER JOIN prices_merged pm ON ci.ticker = pm.ticker
                 LEFT JOIN financials f ON ci.ticker = f.ticker
-                WHERE pm.date >= CURRENT_DATE - INTERVAL '30 days'
+                WHERE pm.date >= CURRENT_DATE - INTERVAL '180 days'
             """
             
             # 시장 필터 적용
@@ -85,7 +85,7 @@ class EnhancedStockScreener:
             
             base_query += """
                 GROUP BY ci.ticker, ci.corp_name, ci.market, ci.sector
-                HAVING COUNT(DISTINCT pm.date) >= 20
+                HAVING COUNT(DISTINCT pm.date) >= 10
             )
             SELECT * FROM stock_data
             ORDER BY revenue DESC NULLS LAST, avg_price DESC

@@ -99,44 +99,63 @@ class YFinanceOnlyETL:
     async def _collect_price_data_yfinance(self, kr_tickers: list):
         logger.info(f"📈 yfinance 주가 데이터 수집 시작: {len(kr_tickers)}개 종목")
         logger.warning("⚠️ 전체 종목 수집은 수 시간이 소요될 수 있습니다.")
-        all_rows = []
-        success_count = 0
-        for kr_ticker in asyncio_tqdm(kr_tickers, desc="📈 yfinance 주가 데이터 수집"):
-            yf_symbol = self.ticker_mapping[kr_ticker]
-            try:
-                # ✨[수정] auto_adjust=True를 명시하여 FutureWarning 제거
-                ticker_data = await asyncio.to_thread(
-                    yf.download,
-                    yf_symbol,
-                    start=COMPETITION_START_DATE,
-                    end=COMPETITION_END_DATE,
-                    progress=False,
-                    timeout=30,
-                    auto_adjust=True
-                )
-                if not ticker_data.empty:
-                    rows = self._convert_to_db_rows(ticker_data, kr_ticker)
-                    if rows:
-                        all_rows.extend(rows)
-                        success_count += 1
-                else:
-                    self.delisted_tickers.add(kr_ticker)
-            except Exception as e:
-                asyncio_tqdm.write(f"❌ {kr_ticker} 수집 중 예외 발생: {e}")
-                self.delisted_tickers.add(kr_ticker)
-            await asyncio.sleep(0.05)
         
-        if all_rows:
-            logger.info(f"💾 주가 데이터 저장: {len(all_rows):,}건 ({success_count}개 종목)")
-            self.session.execute(text("TRUNCATE TABLE prices_merged RESTART IDENTITY;"))
-            chunk_size = 10000
-            for i in range(0, len(all_rows), chunk_size):
-                self.session.bulk_insert_mappings(PriceMerged, all_rows[i:i + chunk_size])
-                self.session.commit()
-                logger.info(f"   저장 진행: {min(i + chunk_size, len(all_rows)):,}/{len(all_rows):,}")
-            logger.info(f"✅ yfinance 주가 데이터 저장 완료!")
-        else:
-            logger.error("❌ 저장할 주가 데이터가 없습니다.")
+        # 첫 번째 배치에서만 테이블 비우기
+        first_batch = True
+        
+        # 배치별 처리 (100개씩)
+        batch_size = 100
+        for batch_start in range(0, len(kr_tickers), batch_size):
+            batch_end = min(batch_start + batch_size, len(kr_tickers))
+            batch_tickers = kr_tickers[batch_start:batch_end]
+            
+            logger.info(f"📦 배치 {batch_start//batch_size + 1} 처리 중: {batch_start+1}~{batch_end}/{len(kr_tickers)}")
+            
+            all_rows = []
+            success_count = 0
+            
+            for kr_ticker in asyncio_tqdm(batch_tickers, desc=f"📈 배치 {batch_start//batch_size + 1} 수집"):
+                yf_symbol = self.ticker_mapping[kr_ticker]
+                try:
+                    ticker_data = await asyncio.to_thread(
+                        yf.download,
+                        yf_symbol,
+                        start=COMPETITION_START_DATE,
+                        end=COMPETITION_END_DATE,
+                        progress=False,
+                        timeout=30,
+                        auto_adjust=True
+                    )
+                    if not ticker_data.empty:
+                        rows = self._convert_to_db_rows(ticker_data, kr_ticker)
+                        if rows:
+                            all_rows.extend(rows)
+                            success_count += 1
+                    else:
+                        self.delisted_tickers.add(kr_ticker)
+                except Exception as e:
+                    asyncio_tqdm.write(f"❌ {kr_ticker} 수집 중 예외 발생: {e}")
+                    self.delisted_tickers.add(kr_ticker)
+                await asyncio.sleep(0.05)
+            
+            # 배치별 저장
+            if all_rows:
+                if first_batch:
+                    logger.info("🗑️ 기존 주가 데이터 삭제 중...")
+                    self.session.execute(text("TRUNCATE TABLE prices_merged RESTART IDENTITY;"))
+                    first_batch = False
+                
+                logger.info(f"💾 배치 데이터 저장: {len(all_rows):,}건 ({success_count}개 종목)")
+                chunk_size = 10000
+                for i in range(0, len(all_rows), chunk_size):
+                    self.session.bulk_insert_mappings(PriceMerged, all_rows[i:i + chunk_size])
+                    self.session.commit()
+                
+                logger.info(f"✅ 배치 {batch_start//batch_size + 1} 저장 완료! (총 진행률: {batch_end}/{len(kr_tickers)})")
+            else:
+                logger.warning(f"⚠️ 배치 {batch_start//batch_size + 1}에서 저장할 데이터가 없습니다.")
+        
+        logger.info("🎉 전체 주가 데이터 수집 및 저장 완료!")
 
     def _convert_to_db_rows(self, df: pd.DataFrame, kr_ticker: str) -> list:
         """DataFrame을 DB 저장용 행 리스트로 변환 (안정성 강화)"""

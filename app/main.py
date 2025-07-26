@@ -161,8 +161,11 @@ async def enhanced_ai_chat(
         # AI 에이전트를 통해 메시지 분석 및 처리
         chat_result = await chat_with_agent(request.message, request.user_profile)
         
-        # 기본 응답 설정
-        response["message"] = chat_result.get("message", "")
+        # 기본 응답 설정 (설명이 있으면 설명을 우선, 없으면 기본 메시지)
+        if chat_result.get("explanation"):
+            response["message"] = chat_result["explanation"]
+        else:
+            response["message"] = chat_result.get("message", "")
         
         # 포트폴리오 분석이 포함된 경우
         if chat_result.get("portfolio_analysis"):
@@ -171,10 +174,6 @@ async def enhanced_ai_chat(
         # 추천 목록이 포함된 경우
         if chat_result.get("recommendations"):
             response["recommendations"] = chat_result["recommendations"]
-        
-        # 설명이 포함된 경우
-        if chat_result.get("explanation"):
-            response["message"] = chat_result["explanation"]
         
         return response
         
