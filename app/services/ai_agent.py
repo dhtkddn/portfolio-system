@@ -659,27 +659,41 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
             
             # 데이터 가용성 확인
             if not comparison_data or "데이터가 없습니다" in str(comparison_data):
-                # 실제 기업명 찾기
-                company_names = []
+                # 실제 기업명과 데이터 현황 확인
+                company_details = []
+                missing_companies = []
+                
                 for ticker in tickers:
                     company_info = stock_database.get_company_info(ticker)
-                    company_names.append(company_info.get('company_name', ticker))
+                    financial_data = stock_database.get_financials(ticker)
+                    
+                    company_name = company_info.get('company_name', ticker) if company_info else ticker
+                    market = company_info.get('market', '알 수 없음') if company_info else '알 수 없음'
+                    
+                    if not financial_data or not any(financial_data.values()):
+                        missing_companies.append(f"{company_name}({ticker}, {market})")
+                    else:
+                        company_details.append(f"{company_name}({ticker}, {market}) ✅")
                 
                 return {
-                    "message": f"""죄송합니다. {', '.join(company_names)} 중 일부 기업의 재무 데이터가 현재 데이터베이스에 없습니다.
+                    "message": f"""**요청하신 기업 현황**
 
-**현재 상황:**
-- 재무데이터 수집이 진행 중입니다 (DART API 활용)
-- 곧 더 많은 기업의 재무제표를 이용할 수 있을 예정입니다
+✅ 재무 데이터 있음: {', '.join(company_details) if company_details else '없음'}
+❌ 재무 데이터 없음: {', '.join(missing_companies) if missing_companies else '없음'}
 
-**당장 이용 가능한 방법:**
-1. 🏢 각 기업의 공식 IR 페이지 방문
-2. 📊 금융감독원 전자공시시스템(DART) 활용
+⚠️ 일부 기업의 재무 데이터가 없어 비교 분석이 제한적입니다.
+
+**현황:**
+- 전체 2,585개 종목 중 826개 종목의 재무 데이터만 보유
+- DART API를 통한 추가 데이터 수집 진행 중
+
+**대안:**
+1. 📊 [금융감독원 DART](https://dart.fss.or.kr)에서 각 기업 검색
+2. 📈 네이버금융에서 각 종목 비교
 3. 🔍 증권사 리서치 보고서 참고
-4. 📈 네이버금융, 인베스팅닷컴 등 금융정보 사이트 이용
 
-시스템 개선 중이니 잠시 후 다시 시도해주세요.""",
-                    "data_source": "Limited data availability"
+재무 데이터 업데이트 예정입니다.""",
+                    "data_source": "Partial data available"
                 }
             
             prompt = f"""
@@ -704,21 +718,30 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
             # 데이터가 없거나 비어있는 경우 즉시 응답
             if not financial_data or not any(financial_data.values()):
                 company_name = company_info.get('company_name', ticker) if company_info else ticker
+                market = company_info.get('market', '알 수 없음') if company_info else '알 수 없음'
+                sector = company_info.get('sector', '알 수 없음') if company_info else '알 수 없음'
+                
                 return {
-                    "message": f"""죄송합니다. {company_name}({ticker})의 재무 데이터가 현재 데이터베이스에 없습니다.
+                    "message": f"""**{company_name}({ticker}) 정보**
 
-**현재 상황:**
-- 재무데이터 수집이 진행 중입니다 (DART API 활용)
-- 곧 더 많은 기업의 재무제표를 이용할 수 있을 예정입니다
+- 시장: {market}
+- 섹터: {sector}
 
-**당장 이용 가능한 방법:**
-1. 🏢 {company_name} 공식 IR 페이지 방문
-2. 📊 금융감독원 전자공시시스템(DART)에서 '{company_name}' 검색
-3. 🔍 증권사 리서치 보고서 참고
-4. 📈 네이버금융, 인베스팅닷컴 등에서 '{ticker}' 검색
+⚠️ 재무 데이터가 현재 데이터베이스에 없습니다.
 
-시스템 개선 중이니 잠시 후 다시 시도해주세요.""",
-                    "data_source": "Limited data availability"
+**현황:**
+- 전체 {market} 종목 중 일부만 재무 데이터 보유
+- 현재 총 2,585개 종목 중 826개 종목의 재무 데이터만 보유
+- DART API를 통한 추가 데이터 수집 진행 중
+
+**대안:**
+1. 🏢 {company_name} 공식 IR 페이지
+2. 📊 [금융감독원 DART](https://dart.fss.or.kr)에서 '{company_name}' 검색
+3. 📈 [네이버금융](https://finance.naver.com/item/main.nhn?code={ticker})에서 확인
+4. 🔍 증권사 리서치 보고서
+
+재무 데이터 업데이트 예정입니다.""",
+                    "data_source": "No financial data available"
                 }
             
             # 연도별 재무 데이터 수집
@@ -749,7 +772,12 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
                         revenue_growth = ((rev - prev_year_data['revenue']) / prev_year_data['revenue']) * 100
                         growth_info = f" (매출 전년대비 {revenue_growth:+.1f}%)"
                     
-                    multi_year_summary += f"- **{year}년**: 매출 {rev/1000000000000:.1f}조원, 영업이익 {op/1000000000000:.1f}조원, 순이익 {net/1000000000000:.1f}조원{growth_info}\n"
+                    # 억원 단위로 변환 (더 읽기 쉽게)
+                    rev_b = rev / 100000000 if rev else 0
+                    op_b = op / 100000000 if op else 0
+                    net_b = net / 100000000 if net else 0
+                    
+                    multi_year_summary += f"- **{year}년**: 매출 {rev_b:,.0f}억원, 영업이익 {op_b:,.0f}억원, 순이익 {net_b:,.0f}억원{growth_info}\n"
                 
                 # 최신 년도 데이터를 기본값으로 사용
                 latest_data = multi_year_data[0]  # 첫 번째가 최신
@@ -770,9 +798,9 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
 {multi_year_summary}
 
 ## 📈 최신 재무 지표 ({latest_year}년 기준)
-- **매출액**: {revenue:,.0f}원 ({revenue/1000000000000:.1f}조원)
-- **영업이익**: {operating_profit:,.0f}원 ({operating_profit/1000000000000:.1f}조원)
-- **당기순이익**: {net_profit:,.0f}원 ({net_profit/1000000000000:.1f}조원)
+- **매출액**: {revenue/100000000:,.0f}억원
+- **영업이익**: {operating_profit/100000000:,.0f}억원
+- **당기순이익**: {net_profit/100000000:,.0f}억원
 - **ROE (자기자본이익률)**: {roe:.1f}%
 - **영업이익률**: {(operating_profit/revenue*100):.1f}% (영업이익/매출액)
 
@@ -781,16 +809,17 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
 
 위의 **연도별 실제 재무 데이터**를 바탕으로 {company_info.get('company_name', f'종목 {ticker}')}의 재무 상태를 구체적으로 분석해주세요:
 
-1. **연도별 트렌드 분석**: 제시된 3개년(2021-2023) 매출과 이익의 변화 패턴
-2. **수익성 분석**: 최신 매출액 {revenue/1000000000000:.1f}조원, 영업이익 {operating_profit/1000000000000:.1f}조원의 의미
-3. **효율성 분석**: ROE {roe:.1f}%와 영업이익률 {(operating_profit/revenue*100):.1f}%의 해석
+1. **연도별 트렌드 분석**: 제시된 3개년의 매출과 이익의 변화 패턴을 구체적인 수치와 함께 분석
+2. **수익성 분석**: 영업이익률과 순이익률의 변화 추이 평가
+3. **효율성 분석**: ROE와 영업이익률의 업계 평균 대비 평가
 4. **성장성 평가**: 연도별 성장률과 미래 전망
 5. **투자 관점**: 위 수치들을 종합한 투자 의견
 
 **중요사항**:
-- 제공된 구체적인 연도별 숫자들을 정확히 인용해주세요
-- 2024년 데이터는 수집 중이므로 2021-2023년 3개년 트렌드를 분석해주세요
-- 각 연도의 수치를 정확히 구분하여 분석해주세요
+- 제공된 구체적인 연도별 숫자들을 정확히 인용해주세요 (단위: 억원)
+- 2021-2023년 3개년 트렌드를 완전히 분석해주세요
+- 각 연도의 수치를 정확히 구분하여 분석하고 성장률도 계산해주세요
+- 분석을 완전히 마무리하고 결론까지 제시해주세요
 """
             
         else:
@@ -1157,7 +1186,19 @@ async def _extract_tickers_from_company_names(message: str) -> List[str]:
             '하나금융': '086790',
             'kb금융': '105560',
             '두산': '000150',
-            'doosan': '000150'
+            'doosan': '000150',
+            # 금호타이어 매핑 추가
+            '금호': '073240',
+            '금호타이어': '073240',
+            'kumho': '073240',
+            'kumho tire': '073240',
+            # 미래에셋 그룹 매핑 추가
+            '미래에셋증권': '006800',
+            '미래에셋': '006800',
+            'mirae asset securities': '006800',
+            'mirae asset': '006800',
+            '미래에셋생명': '085620',
+            'mirae asset life': '085620'
         }
         
         # 직접 매핑 먼저 확인
@@ -1216,12 +1257,10 @@ async def _extract_tickers_from_company_names(message: str) -> List[str]:
                                    ELSE 3
                                END as priority
                         FROM company_info ci
-                        JOIN financials f ON ci.ticker = f.ticker
                         WHERE ci.corp_name LIKE :keyword
                            OR REPLACE(LOWER(ci.corp_name), ' ', '') LIKE :keyword_no_space
                            OR REPLACE(LOWER(ci.corp_name), '.', '') LIKE :keyword_no_dot
                            OR REPLACE(LOWER(ci.corp_name), ',', '') LIKE :keyword_no_comma
-                        GROUP BY ci.ticker, ci.corp_name
                         ORDER BY priority, ci.corp_name
                         LIMIT 3
                     """), {

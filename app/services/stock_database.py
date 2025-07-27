@@ -195,11 +195,11 @@ class StockDatabase:
             row = result.fetchone()
             
             if row:
-                revenue = row[1] if row[1] else 0
-                operating_profit = row[2] if row[2] else 0
-                net_profit = row[3] if row[3] else 0
+                revenue = float(row[1]) if row[1] is not None else 0
+                operating_profit = float(row[2]) if row[2] is not None else 0
+                net_profit = float(row[3]) if row[3] is not None else 0
                 
-                # ROE 계산 (간단히)
+                # ROE 계산 (간단히 - 실제로는 자기자본 대비 계산해야 함)
                 roe = (net_profit / revenue * 100) if revenue > 0 else 0
                 
                 return {
@@ -543,13 +543,13 @@ class StockDatabase:
             
             multi_year_data = []
             for row in rows:
-                if row[1] and row[2] and row[3]:  # 모든 데이터가 있는 경우만
-                    multi_year_data.append({
-                        "year": row[0],
-                        "revenue": row[1],
-                        "operating_profit": row[2],
-                        "net_profit": row[3]
-                    })
+                # NULL 값도 0으로 처리하여 포함
+                multi_year_data.append({
+                    "year": row[0],
+                    "revenue": float(row[1]) if row[1] is not None else 0,
+                    "operating_profit": float(row[2]) if row[2] is not None else 0,
+                    "net_profit": float(row[3]) if row[3] is not None else 0
+                })
             
             logger.info(f"📊 {ticker} 연도별 재무데이터: {len(multi_year_data)}개년")
             return multi_year_data

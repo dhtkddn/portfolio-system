@@ -241,8 +241,8 @@ async def get_hyperclova_response(prompt: Union[str, List[Dict[str, str]]]) -> s
         messages = [{"role": "user", "content": str(prompt)}]
     
     if IS_MOCK_MODE:
-        logger.info("📝 모의(Mock) 모드로 AI 응답을 생성합니다.")
-        return _generate_enhanced_mock_response(messages)
+        logger.warning("HyperCLOVA API 키가 설정되지 않았습니다.")
+        return "⚠️ HyperCLOVA API 키가 설정되지 않았습니다.\n\n.env 파일에 NCP_CLOVASTUDIO_API_KEY를 설정해주세요."
 
     try:
         content = await _call_hcx_api(messages)
@@ -252,12 +252,12 @@ async def get_hyperclova_response(prompt: Union[str, List[Dict[str, str]]]) -> s
             formatted_content = _format_response_text(cleaned_content)
             return formatted_content
         else:
-            # 빈 응답이거나 너무 짧은 경우 모의 응답으로 대체
-            logger.warning("빈 응답 또는 너무 짧은 응답으로 인해 모의 응답으로 대체합니다.")
-            return _generate_enhanced_mock_response(messages)
+            # 빈 응답이거나 너무 짧은 경우
+            logger.warning("HyperCLOVA API 응답이 비어있거나 너무 짧습니다.")
+            return "⚠️ HyperCLOVA API 연결은 되었으나 응답이 비어있습니다. 잠시 후 다시 시도해주세요."
     except Exception as e:
-        logger.error(f"get_hyperclova_response 처리 중 최종 오류 발생, 모의 응답으로 대체합니다: {e}")
-        return _generate_enhanced_mock_response(messages)
+        logger.error(f"get_hyperclova_response 처리 중 오류 발생: {e}")
+        return f"❌ HyperCLOVA API 연결 실패: {str(e)}\n\n현재 AI 응답 생성에 문제가 있습니다. 잠시 후 다시 시도해주세요."
 
 
 # 하위 호환성을 위한 별칭들
@@ -281,13 +281,13 @@ def _remove_duplicate_response(text: str) -> str:
     if len(text) < 200:
         return text
     
-    # 방법 1: 정확히 반으로 나누어 체크
+    # 방법 1: 정확히 반으로 나누어 체크 (더 엄격하게)
     half_length = len(text) // 2
     first_half = text[:half_length].strip()
     second_half = text[half_length:].strip()
     
-    # 완전 동일한 경우
-    if first_half == second_half:
+    # 완전 동일하고 길이가 충분히 긴 경우만 (너무 공격적 방지)
+    if first_half == second_half and len(first_half) > 500:
         logger.info("🔧 완전 중복 응답 감지 및 제거 (완전일치)")
         return first_half
     
@@ -300,27 +300,24 @@ def _remove_duplicate_response(text: str) -> str:
                           if i < len(first_half) and i < len(second_half) and first_half[i] == second_half[i])
         
         similarity = common_chars / longer if longer > 0 else 0
-        if similarity > 0.8:  # 80% 이상 유사하면 중복으로 판단
+        if similarity > 0.95 and len(first_half) > 1000:  # 95% 이상 유사하고 충분히 긴 경우만
             logger.info(f"🔧 유사도 기반 중복 응답 감지 및 제거 (유사도: {similarity:.2f})")
             return first_half
     
-    # 방법 3: 특정 패턴으로 나누어 체크 (더 정확)
-    # 재무제표 분석 관련 중복 패턴들
-    duplicate_patterns = [
-        r'삼성전자.*?의\s*재무\s*상태\s*분석',
-        r'[가-힣]+전자.*?재무\s*분석',
-        r'재무\s*상태.*?분석.*?진행',
-        r'포트폴리오.*?분석.*?결과',
-        r'투자.*?추천.*?드리겠습니다'
+    # 방법 3: 명확한 중복 패턴만 제거 (보수적으로)
+    # 정말 명확한 중복만 제거
+    obvious_duplicate_patterns = [
+        r'동일한\s*내용이\s*반복되어\s*나타납니다',
+        r'이상으로.*?분석을.*?마치겠습니다.*?이상으로.*?분석을.*?마치겠습니다'
     ]
     
-    for pattern in duplicate_patterns:
+    for pattern in obvious_duplicate_patterns:
         matches = re.findall(pattern, text, re.DOTALL | re.IGNORECASE)
         if len(matches) >= 2:
             # 두 번째 패턴 이후 텍스트 제거
             second_match_pos = text.find(matches[1])
             if second_match_pos > 0:
-                logger.info(f"🔧 패턴 기반 중복 응답 감지 및 제거 (패턴: {pattern[:20]}...)")
+                logger.info(f"🔧 명확한 중복 패턴 제거 (패턴: {pattern[:20]}...)")
                 return text[:second_match_pos].strip()
     
     # 방법 4: 문장별 중복 체크 (더 정밀)
@@ -681,21 +678,8 @@ def _generate_enhanced_mock_response(messages: List[Dict[str, str]]) -> str:
 ※ 현재 HyperCLOVA API가 연결되면 더욱 정확한 분석을 제공할 수 있습니다.
 """.strip()
     
-    # 재무제표 관련 질문인지 확인
-    if any(keyword in message_lower for keyword in ['재무제표', '재무', '비교', '분석', '실적']):
-        return f"""죄송합니다. 요청하신 재무제표 분석을 위한 데이터가 현재 제한적입니다.
-
-**데이터 현황:**
-- 현재 시스템에는 68개 주요 종목의 재무 데이터만 보유
-- 요청하신 기업들의 데이터가 없을 가능성이 높음
-
-**권장 방법:**
-1. 📊 금융감독원 전자공시시스템(DART) 이용
-2. 🏢 각 기업 공식 IR 페이지 확인  
-3. 🔍 증권사 리서치 보고서 참고
-4. 📈 네이버금융, 인베스팅닷컴 등 활용
-
-시스템 개선을 통해 더 많은 기업의 재무 데이터를 확보하도록 하겠습니다."""
+    # 재무제표 관련 질문은 실제 데이터를 사용해야 하므로 모의 응답 제거
+    # 기존의 재무제표 모의 응답은 사용하지 않음
     
     return f"""안녕하세요! MIRAE 포트폴리오 AI입니다.
 
