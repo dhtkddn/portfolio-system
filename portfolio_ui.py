@@ -23,12 +23,28 @@ with st.sidebar:
     user_profile = {
         "age": st.slider("나이", 20, 70, 35),
         "monthly_income": st.number_input("월 소득 (만원)", 100, 2000, 400),
-        "investment_amount": st.number_input("월 투자 가능 금액 (만원)", 10, 1000, 100),
+        "investment_amount": st.number_input("투자 금액 (만원)", 100, 50000, 1000),
         "experience_level": st.selectbox("투자 경험", ["초보", "중급", "고급"]),
-        "risk_tolerance": st.selectbox("위험 성향", ["안전형", "중립형", "공격형"]),
+        "risk_tolerance": st.selectbox("위험 성향", [
+            "안전형 (원금보전 우선)", 
+            "안정추구형 (안정성+수익성)", 
+            "위험중립형 (균형투자)", 
+            "적극투자형 (성장투자)", 
+            "공격투자형 (고위험고수익)"
+        ]),
         "investment_goal": st.selectbox("투자 목표", ["단기수익", "장기투자", "은퇴준비", "자산증식"]),
         "investment_period": st.selectbox("투자 기간", ["1년", "3년", "5년", "10년", "10년 이상"])
     }
+    
+    # 위험성향 간단화 (API 호환성)
+    risk_map = {
+        "안전형 (원금보전 우선)": "안전형",
+        "안정추구형 (안정성+수익성)": "안전형",
+        "위험중립형 (균형투자)": "중립형",
+        "적극투자형 (성장투자)": "공격형",
+        "공격투자형 (고위험고수익)": "공격형"
+    }
+    user_profile["risk_appetite"] = risk_map[user_profile["risk_tolerance"]]
     
     st.markdown("---")
     st.header("⚙️ 분석 옵션")
@@ -84,11 +100,12 @@ st.title("🤖 Portfolio AI 투자 상담 - Enhanced")
 st.subheader("AI와 함께하는 맞춤형 투자 컨설팅 (다중 최적화 지원)")
 
 # 탭 구성
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "💬 AI 채팅 및 추천", 
     "📊 포트폴리오 비교 분석", 
     "⚡ 빠른 추천",
-    "🧪 시스템 테스트"
+    "🧪 시스템 테스트",
+    "🎯 5단계 위험성향 테스트"
 ])
 
 # 세션 상태 초기화
@@ -268,46 +285,45 @@ with tab1:
             st.markdown(prompt)
 
         # AI 응답 요청
-        with st.chat_message("assistant"):
-            with st.spinner("AI가 답변을 생성하고 있습니다..."):
+        with st.spinner("AI가 답변을 생성하고 있습니다..."):
+            
+            # Enhanced Chat API 사용
+            payload = {
+                "message": prompt,
+                "user_profile": user_profile,
+                "include_portfolio": True,
+                "optimization_preference": selected_mode if selected_mode else None,
+                "comparison_analysis": include_comparison
+            }
+            
+            response_data = call_api("/api/v2/chat/enhanced", payload)
+            
+            if response_data:
+                # AI 메시지
+                ai_message = response_data.get("message", "응답을 받지 못했습니다.")
                 
-                # Enhanced Chat API 사용
-                payload = {
-                    "message": prompt,
-                    "user_profile": user_profile,
-                    "include_portfolio": True,
-                    "optimization_preference": selected_mode,
-                    "comparison_analysis": include_comparison
+                # 채팅 히스토리에 저장
+                chat_entry = {
+                    "role": "assistant",
+                    "content": ai_message
                 }
                 
-                response_data = call_api("/api/v2/chat/enhanced", payload)
+                # 포트폴리오 분석 결과 추가
+                if response_data.get("portfolio_analysis"):
+                    chat_entry["portfolio_analysis"] = response_data["portfolio_analysis"]
                 
-                if response_data:
-                    # AI 메시지 표시
-                    ai_message = response_data.get("message", "응답을 받지 못했습니다.")
-                    st.markdown(ai_message)
-                    
-                    # 채팅 히스토리에 저장
-                    chat_entry = {
-                        "role": "assistant",
-                        "content": ai_message
+                # 비교 분석 결과 추가
+                if response_data.get("comparison_summary"):
+                    chat_entry["comparison_data"] = {
+                        "comparison_results": response_data.get("optimization_options", {}),
+                        "recommendation": response_data.get("comparison_summary", "")
                     }
-                    
-                    # 포트폴리오 분석 결과 추가
-                    if response_data.get("portfolio_analysis"):
-                        chat_entry["portfolio_analysis"] = response_data["portfolio_analysis"]
-                    
-                    # 비교 분석 결과 추가
-                    if response_data.get("comparison_summary"):
-                        chat_entry["comparison_data"] = {
-                            "comparison_results": response_data.get("optimization_options", {}),
-                            "recommendation": response_data.get("comparison_summary", "")
-                        }
-                    
-                    st.session_state.chat_history.append(chat_entry)
-                    
-                else:
-                    st.error("AI로부터 응답을 받지 못했습니다.")
+                
+                st.session_state.chat_history.append(chat_entry)
+                st.rerun()  # 채팅 히스토리 업데이트를 위해 rerun
+                
+            else:
+                st.error("AI로부터 응답을 받지 못했습니다.")
 
 # --- Tab 2: 포트폴리오 비교 분석 ---
 with tab2:
@@ -613,6 +629,268 @@ with tab4:
                 
             except Exception as e:
                 st.error(f"최적화 방식 정보 조회 실패: {e}")
+
+# --- Tab 5: 5단계 위험성향 테스트 ---
+with tab5:
+    st.markdown("### 🎯 신한증권 5단계 위험성향 시스템 테스트")
+    st.info("신한증권 기준의 5단계 위험성향 분류 시스템을 실제 질문으로 테스트해보세요!")
+    
+    # 테스트 시나리오 선택
+    test_scenarios = {
+        "안전형 테스트": {
+            "question": "1000만원으로 안전하게 투자하고 싶어요. 원금손실은 절대 피하고 싶습니다.",
+            "expected": "안정추구형으로 분류, 대형 우량주 중심"
+        },
+        "균형형 테스트": {
+            "question": "5000만원으로 코스피 대형주 중심으로 포트폴리오 만들어주세요. 적당한 수익을 원해요.",
+            "expected": "위험중립형 분류, 코스피 키워드 감지"
+        },
+        "성장형 테스트": {
+            "question": "반도체주와 바이오 중심으로 공격적인 포트폴리오 원합니다. 1억원 투자할게요.",
+            "expected": "적극투자형 분류, 반도체/바이오 섹터 우선"
+        },
+        "코스닥 테스트": {
+            "question": "코스닥 게임주 중심으로 구성해주세요. 높은 변동성도 괜찮아요. 3000만원 투자합니다.",
+            "expected": "적극투자형 분류, 코스닥 키워드 감지"
+        },
+        "은퇴 준비 테스트": {
+            "question": "은퇴 준비용으로 2억원 투자하려고 해요. 안정적이면서 조금의 성장도 원해요.",
+            "expected": "안정추구형 분류, 배당주/우량주 중심"
+        },
+        "직접 입력": {
+            "question": "",
+            "expected": "사용자 직접 입력"
+        }
+    }
+    
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        selected_scenario = st.selectbox(
+            "테스트 시나리오 선택",
+            list(test_scenarios.keys()),
+            help="미리 준비된 시나리오를 선택하거나 직접 입력하세요"
+        )
+        
+        if selected_scenario == "직접 입력":
+            test_question = st.text_area(
+                "테스트할 질문을 입력하세요",
+                placeholder="예: 1000만원으로 IT주 중심으로 포트폴리오 만들어주세요",
+                height=100
+            )
+        else:
+            test_question = st.text_area(
+                "테스트 질문",
+                value=test_scenarios[selected_scenario]["question"],
+                height=100
+            )
+    
+    with col2:
+        st.markdown("**기대 결과:**")
+        if selected_scenario != "직접 입력":
+            st.info(test_scenarios[selected_scenario]["expected"])
+        else:
+            st.info("직접 입력한 질문에 따라 결과가 달라집니다")
+        
+        # 위험성향 가이드
+        with st.expander("📋 5단계 위험성향 가이드"):
+            st.markdown("""
+            **안정형**: 원금보전 최우선 (주식 5%)
+            **안정추구형**: 안정성+수익성 (주식 20%)
+            **위험중립형**: 균형투자 (주식 45%)
+            **적극투자형**: 성장투자 (주식 70%)
+            **공격투자형**: 고위험고수익 (주식 90%)
+            """)
+    
+    # 테스트 실행
+    if st.button("🚀 위험성향 시스템 테스트 실행", type="primary"):
+        if not test_question.strip():
+            st.warning("테스트할 질문을 입력해주세요.")
+        else:
+            with st.spinner("5단계 위험성향 시스템으로 분석 중..."):
+                
+                # 기본 투자자 프로필 생성
+                test_profile = {
+                    "initial_capital": user_profile["investment_amount"] * 10000,
+                    "risk_appetite": user_profile["risk_appetite"],
+                    "investment_amount": user_profile["investment_amount"] * 10000,
+                    "investment_goal": user_profile["investment_goal"],
+                    "investment_period": user_profile["investment_period"],
+                    "age": user_profile["age"],
+                    "experience_level": user_profile["experience_level"]
+                }
+                
+                # Enhanced 포트폴리오 API 호출 (직접 구현)
+                try:
+                    import sys
+                    import os
+                    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+                    
+                    from app.services.portfolio_enhanced import create_smart_portfolio
+                    from app.services.portfolio_explanation import generate_enhanced_portfolio_explanation
+                    from app.services.stock_database import StockDatabase
+                    from app.schemas import PortfolioInput
+                    import asyncio
+                    
+                    # PortfolioInput 생성
+                    portfolio_input = PortfolioInput(**test_profile)
+                    
+                    # 데이터베이스 연결
+                    db = StockDatabase()
+                    
+                    # 포트폴리오 분석
+                    result = create_smart_portfolio(
+                        user_input=portfolio_input,
+                        db=db,
+                        original_message=test_question
+                    )
+                    
+                    if "error" in result:
+                        st.error(f"❌ 분석 실패: {result['error']}")
+                    else:
+                        # 결과 표시
+                        st.success("✅ 5단계 위험성향 분석 완료!")
+                        
+                        # 위험성향 분석 결과
+                        risk_analysis = result.get('risk_profile_analysis', {})
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric(
+                                "위험성향 분류", 
+                                risk_analysis.get('risk_profile_type', 'N/A'),
+                                help="신한증권 5단계 위험성향 분류 결과"
+                            )
+                        with col2:
+                            st.metric(
+                                "시장 필터", 
+                                result.get('market_filter', 'N/A'),
+                                help="사용자 메시지에서 감지된 시장 선호도"
+                            )
+                        with col3:
+                            st.metric(
+                                "선별 종목 수", 
+                                f"{result.get('selected_tickers_count', 0)}개",
+                                help="위험성향에 따라 선별된 종목 수"
+                            )
+                        
+                        # 가이드라인 정보
+                        guideline = risk_analysis.get('asset_allocation_guideline', {})
+                        if guideline:
+                            st.subheader("📋 자산배분 가이드라인")
+                            
+                            col1, col2, col3, col4 = st.columns(4)
+                            with col1:
+                                st.info(f"**권장 주식비중**\n{guideline.get('stocks_target', 'N/A')}%")
+                            with col2:
+                                st.info(f"**권장 채권비중**\n{guideline.get('bonds_target', 'N/A')}%")
+                            with col3:
+                                st.info(f"**단일종목 한도**\n{guideline.get('max_single_stock_limit', 'N/A')}%")
+                            with col4:
+                                st.info(f"**선호 시장**\n{guideline.get('preferred_market', 'N/A')}")
+                            
+                            st.markdown(f"**투자 철학**: {guideline.get('description', 'N/A')}")
+                            st.markdown(f"**적합 섹터**: {', '.join(guideline.get('suitable_sectors', []))}")
+                        
+                        # 실제 포트폴리오 구성
+                        weights = result.get('weights', {})
+                        if weights:
+                            st.subheader("💼 실제 포트폴리오 구성")
+                            
+                            portfolio_data = []
+                            for ticker, info in weights.items():
+                                portfolio_data.append({
+                                    "종목명": info.get('name', ticker),
+                                    "종목코드": ticker,
+                                    "비중": f"{info.get('weight', 0):.1%}",
+                                    "섹터": info.get('sector', 'N/A'),
+                                    "시장": info.get('market', 'N/A')
+                                })
+                            
+                            st.dataframe(portfolio_data, use_container_width=True)
+                        
+                        # 성과 지표
+                        performance = result.get('performance', {})
+                        if performance:
+                            st.subheader("📊 예상 성과")
+                            
+                            col1, col2, col3 = st.columns(3)
+                            with col1:
+                                st.metric(
+                                    "예상 연수익률", 
+                                    f"{performance.get('expected_annual_return', 0):.1%}"
+                                )
+                            with col2:
+                                st.metric(
+                                    "연변동성", 
+                                    f"{performance.get('annual_volatility', 0):.1%}"
+                                )
+                            with col3:
+                                st.metric(
+                                    "샤프비율", 
+                                    f"{performance.get('sharpe_ratio', 0):.3f}"
+                                )
+                        
+                        # 준수성 검사
+                        compliance = risk_analysis.get('compliance_check', {})
+                        if compliance:
+                            st.subheader("✅ 가이드라인 준수 여부")
+                            
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                sector_compliant = compliance.get('within_sector_guidelines', False)
+                                st.metric(
+                                    "섹터 가이드라인 준수", 
+                                    "✅ 준수" if sector_compliant else "❌ 미준수"
+                                )
+                            with col2:
+                                limit_compliant = compliance.get('single_stock_limit_compliance', False)
+                                st.metric(
+                                    "단일종목 한도 준수", 
+                                    "✅ 준수" if limit_compliant else "❌ 미준수"
+                                )
+                        
+                        # AI 설명 생성
+                        with st.expander("🤖 AI 상세 분석 보기"):
+                            try:
+                                # 비동기 함수 실행
+                                async def get_explanation():
+                                    return await generate_enhanced_portfolio_explanation(result)
+                                
+                                explanation = asyncio.run(get_explanation())
+                                st.markdown(explanation)
+                                
+                            except Exception as e:
+                                st.error(f"AI 설명 생성 실패: {e}")
+                                st.markdown("**기본 분석 결과만 표시됩니다.**")
+                        
+                        # 키워드 감지 결과
+                        st.subheader("🔍 키워드 감지 결과")
+                        st.markdown(f"**원본 질문**: {test_question}")
+                        st.markdown(f"**감지된 시장**: {result.get('market_filter', 'N/A')}")
+                        st.markdown(f"**분류된 위험성향**: {risk_analysis.get('risk_profile_type', 'N/A')}")
+                        
+                except Exception as e:
+                    st.error(f"❌ 테스트 실행 중 오류: {e}")
+                    import traceback
+                    with st.expander("오류 상세 정보"):
+                        st.code(traceback.format_exc())
+    
+    # 사전 정의된 테스트 결과 예시
+    st.markdown("---")
+    st.subheader("📝 테스트 시나리오별 예상 결과")
+    
+    scenario_results = {
+        "안전형 테스트": "안정추구형 → 주식 20%, 금융/전기전자 섹터 우선, KOSPI 선호",
+        "균형형 테스트": "위험중립형 → 주식 45%, 코스피 키워드 감지, 균형 섹터 분산",
+        "성장형 테스트": "적극투자형 → 주식 70%, 반도체/바이오 섹터 우선, 고성장 중심",
+        "코스닥 테스트": "적극투자형 → 주식 70%, 코스닥 키워드 감지, 게임 섹터 우선",
+        "은퇴 준비 테스트": "안정추구형 → 주식 20%, 배당주/우량주 중심, 안정성 우선"
+    }
+    
+    for scenario, expected_result in scenario_results.items():
+        with st.expander(f"💡 {scenario}"):
+            st.info(expected_result)
 
 # --- 푸터 ---
 st.markdown("---")

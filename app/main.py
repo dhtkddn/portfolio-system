@@ -153,27 +153,95 @@ async def enhanced_ai_chat(
     db: StockDatabase = Depends(get_stock_db)
 ):
     """
-    향상된 AI 채팅 - 포트폴리오 옵션과 비교 분석 지원
+    5단계 위험성향 시스템이 적용된 향상된 AI 채팅
     """
     try:
+        from app.services.portfolio_enhanced import create_smart_portfolio
+        from app.services.portfolio_explanation import generate_enhanced_portfolio_explanation
+        from app.schemas import PortfolioInput
+        
         response = {"message": "", "portfolio_analysis": None, "comparison_summary": None}
         
-        # AI 에이전트를 통해 메시지 분석 및 처리
-        chat_result = await chat_with_agent(request.message, request.user_profile)
+        # 포트폴리오 관련 질문인지 확인
+        portfolio_keywords = ["투자", "포트폴리오", "주식", "종목", "추천", "만원", "억원", "적극", "안전", "공격", "중립"]
+        is_portfolio_request = any(keyword in request.message for keyword in portfolio_keywords)
         
-        # 기본 응답 설정 (설명이 있으면 설명을 우선, 없으면 기본 메시지)
-        if chat_result.get("explanation"):
-            response["message"] = chat_result["explanation"]
+        if is_portfolio_request and request.include_portfolio:
+            # 5단계 위험성향 시스템 사용
+            
+            # 사용자 프로필에서 PortfolioInput 생성
+            user_profile = request.user_profile or {}
+            
+            # 투자 금액 추출 (만원 단위로 변환)
+            investment_amount = user_profile.get("investment_amount", 1000)  # 기본값 1000만원
+            if investment_amount < 1000:  # 1000만원 미만이면 만원 단위로 가정
+                investment_amount *= 10000
+            
+            # 위험성향 추출 및 매핑
+            raw_risk = user_profile.get("risk_appetite", user_profile.get("risk_tolerance", "중립형"))
+            
+            # UI에서 오는 상세 위험성향을 기본 3단계로 매핑
+            risk_mapping = {
+                "안전형 (원금보전 우선)": "안전형",
+                "안정추구형 (안정성+수익성)": "안전형", 
+                "위험중립형 (균형투자)": "중립형",
+                "적극투자형 (성장투자)": "공격형",
+                "공격투자형 (고위험고수익)": "공격형"
+            }
+            
+            # 공격적 투자 키워드 감지
+            aggressive_keywords = ["적극", "공격", "고위험", "고수익", "변동성", "성장"]
+            if any(keyword in request.message for keyword in aggressive_keywords):
+                mapped_risk = "공격형"
+            else:
+                mapped_risk = risk_mapping.get(raw_risk, raw_risk)
+                
+            # 기본값이 없으면 중립형으로 설정
+            if not mapped_risk:
+                mapped_risk = "중립형"
+            
+            portfolio_input = PortfolioInput(
+                initial_capital=investment_amount,
+                risk_appetite=mapped_risk,
+                investment_amount=investment_amount,
+                investment_goal=user_profile.get("investment_goal", "자산증식"),
+                investment_period=user_profile.get("investment_period", "3년"),
+                age=user_profile.get("age", 35),
+                experience_level=user_profile.get("experience_level", "중급")
+            )
+            
+            # 5단계 위험성향 포트폴리오 생성
+            portfolio_result = create_smart_portfolio(
+                user_input=portfolio_input,
+                db=db,
+                original_message=request.message
+            )
+            
+            if "error" not in portfolio_result:
+                # 성공적으로 포트폴리오 생성됨
+                response["portfolio_analysis"] = portfolio_result
+                
+                # AI 설명 생성
+                try:
+                    explanation = await generate_enhanced_portfolio_explanation(portfolio_result)
+                    response["message"] = explanation
+                except Exception as e:
+                    logger.error(f"AI 설명 생성 실패: {e}")
+                    response["message"] = "포트폴리오가 성공적으로 생성되었습니다. 5단계 위험성향 분석 결과를 확인해보세요."
+            else:
+                # 포트폴리오 생성 실패 시 기존 시스템 사용
+                chat_result = await chat_with_agent(request.message, request.user_profile)
+                response["message"] = chat_result.get("explanation", chat_result.get("message", ""))
+                if chat_result.get("portfolio_analysis"):
+                    response["portfolio_analysis"] = chat_result["portfolio_analysis"]
         else:
-            response["message"] = chat_result.get("message", "")
-        
-        # 포트폴리오 분석이 포함된 경우
-        if chat_result.get("portfolio_analysis"):
-            response["portfolio_analysis"] = chat_result["portfolio_analysis"]
-        
-        # 추천 목록이 포함된 경우
-        if chat_result.get("recommendations"):
-            response["recommendations"] = chat_result["recommendations"]
+            # 포트폴리오 관련이 아닌 일반 질문은 기존 시스템 사용
+            chat_result = await chat_with_agent(request.message, request.user_profile)
+            response["message"] = chat_result.get("explanation", chat_result.get("message", ""))
+            if chat_result.get("portfolio_analysis"):
+                response["portfolio_analysis"] = chat_result["portfolio_analysis"]
+            if chat_result.get("recommendations"):
+                response["recommendations"] = chat_result["recommendations"]
         
         return response
         

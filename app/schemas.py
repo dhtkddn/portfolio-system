@@ -31,6 +31,11 @@ class PortfolioInput(BaseModel):
     age: Optional[int] = Field(default=35, description="나이")
     experience_level: str = Field(default="초보", description="투자 경험")
     
+    # 금융소비자보호법 준수를 위한 추가 필드
+    investment_amount: Optional[float] = Field(default=None, description="투자 금액")
+    total_assets: Optional[float] = Field(default=None, description="총 자산")
+    income_level: Optional[float] = Field(default=None, description="연 소득")
+    
     # 추가 옵션 필드들
     preferred_sectors: Optional[List[str]] = Field(default=[], description="선호 업종")
     excluded_sectors: Optional[List[str]] = Field(default=[], description="제외 업종")
@@ -111,9 +116,9 @@ class EnhancedChatRequest(BaseModel):
     
     # 포트폴리오 관련 옵션
     include_portfolio: bool = Field(default=True, description="포트폴리오 추천 포함 여부")
-    optimization_preference: Optional[OptimizationMode] = Field(
+    optimization_preference: Optional[str] = Field(
         default=None, 
-        description="선호하는 최적화 방식"
+        description="선호하는 최적화 방식 (mathematical, practical, conservative, None)"
     )
     comparison_analysis: bool = Field(default=False, description="비교 분석 수행 여부")
     
