@@ -216,12 +216,15 @@ async def _handle_portfolio_request(message: str, user_profile: Dict) -> Dict[st
         }
     
     try:
-        # PortfolioInput 생성
+        # PortfolioInput 생성 (금융소비자보호법 필드 추가)
         portfolio_input = PortfolioInput(
             initial_capital=user_profile.get("investment_amount", 1000) * 10000,
             risk_appetite=user_profile.get("risk_tolerance", "중립형"),
             experience_level=user_profile.get("experience_level", "초보"),
             age=user_profile.get("age", 35),
+            investment_amount=user_profile.get("investment_amount", 1000) * 10000,
+            total_assets=user_profile.get("total_assets", user_profile.get("investment_amount", 1000) * 30000),
+            income_level=user_profile.get("income_level", 50000000),
             original_message=message  # 원본 메시지 전달
         )
         
@@ -251,12 +254,30 @@ async def _handle_portfolio_request(message: str, user_profile: Dict) -> Dict[st
         elif market_filter == "kosdaq_only":
             market_info = "코스닥 종목으로만 구성된 "
         
+        # 투자자 보호 정보 추출
+        investor_protection = result.get("portfolio_details", {}).get("investor_protection", {})
+        warnings = investor_protection.get("warnings", {})
+        
+        # 모든 경고 메시지 수집
+        all_warnings = []
+        all_warnings.extend(warnings.get("risk_warnings", []))
+        all_warnings.extend(warnings.get("suitability_warnings", []))
+        all_warnings.extend(warnings.get("appropriateness_warnings", []))
+        all_warnings.extend(warnings.get("concentration_warnings", []))
+        
+        # 응답 메시지에 경고 포함
+        protection_message = ""
+        if all_warnings:
+            protection_message = "\n\n[투자자 보호 안내]\n" + "\n".join(all_warnings)
+        
         return {
             "recommendations": recommendations,
             "explanation": result.get("explanation", ""),
-            "message": f"PostgreSQL 기반 {market_info}포트폴리오 추천이 완료되었습니다.",
+            "message": f"PostgreSQL 기반 {market_info}포트폴리오 추천이 완료되었습니다.{protection_message}",
             "data_source": "PostgreSQL yfinance data",
-            "portfolio_analysis": result.get("portfolio_details", {})
+            "portfolio_analysis": result.get("portfolio_details", {}),
+            "investor_protection": investor_protection,
+            "investment_explanation": investor_protection.get("investment_explanation", {})
         }
         
     except Exception as e:
@@ -765,12 +786,16 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
                     op = year_data['operating_profit'] 
                     net = year_data['net_profit']
                     
-                    # 전년 대비 증감률 계산
+                    # 전년 대비 증감률 계산 (division by zero 방지)
                     growth_info = ""
                     if i < len(multi_year_data) - 1:
                         prev_year_data = multi_year_data[i + 1]
-                        revenue_growth = ((rev - prev_year_data['revenue']) / prev_year_data['revenue']) * 100
-                        growth_info = f" (매출 전년대비 {revenue_growth:+.1f}%)"
+                        prev_revenue = prev_year_data['revenue']
+                        if prev_revenue and prev_revenue > 0:
+                            revenue_growth = ((rev - prev_revenue) / prev_revenue) * 100
+                            growth_info = f" (매출 전년대비 {revenue_growth:+.1f}%)"
+                        else:
+                            growth_info = " (전년 매출 데이터 없음)"
                     
                     # 억원 단위로 변환 (더 읽기 쉽게)
                     rev_b = rev / 100000000 if rev else 0
@@ -787,6 +812,10 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
                 roe = (net_profit / revenue * 100) if revenue > 0 else 0
                 latest_year = latest_data['year']
             
+            # 영업이익률 안전하게 계산
+            operating_margin = (operating_profit/revenue*100) if revenue > 0 else 0
+            operating_margin_text = f"{operating_margin:.1f}% (영업이익/매출액)" if revenue > 0 else "N/A (매출액 0)"
+            
             prompt = f"""
 **{company_info.get('company_name', f'종목 {ticker}')}({ticker}) 재무제표 분석**
 
@@ -802,7 +831,7 @@ async def _handle_financial_request(message: str, user_profile: Optional[Dict]) 
 - **영업이익**: {operating_profit/100000000:,.0f}억원
 - **당기순이익**: {net_profit/100000000:,.0f}억원
 - **ROE (자기자본이익률)**: {roe:.1f}%
-- **영업이익률**: {(operating_profit/revenue*100):.1f}% (영업이익/매출액)
+- **영업이익률**: {operating_margin_text}
 
 ## 📈 분석 요청
 사용자 질문: "{message}"
@@ -1201,26 +1230,60 @@ async def _extract_tickers_from_company_names(message: str) -> List[str]:
             'mirae asset life': '085620'
         }
         
-        # 직접 매핑 먼저 확인
+        # 직접 매핑 먼저 확인 (모든 매칭 수집) - 더 구체적인 이름 우선
         logger.info(f"🔍 회사명 매핑 시도: '{message_lower}'")
         
-        for keyword, ticker in direct_mappings.items():
-            if keyword in message_lower:
-                logger.info(f"🎯 키워드 매칭: '{keyword}' -> {ticker}")
-                
-                # 해당 ticker가 DB에 있는지 확인
-                result = session.execute(text("""
-                    SELECT ticker, corp_name 
-                    FROM company_info 
-                    WHERE ticker = :ticker
-                """), {"ticker": ticker}).fetchone()
-                
-                if result:
-                    tickers.append(result[0])
-                    logger.info(f"🎯 직접 매핑: {result[1]} ({result[0]})")
-                    return list(set(tickers))  # 중복 제거
-                else:
-                    logger.warning(f"⚠️ DB에서 {ticker} 찾을 수 없음")
+        # 특정 회사명 충돌 처리 (에코프로비엠 vs 에코프로)
+        conflicting_companies = {
+            '에코프로비엠': ('247540', ['에코프로비엠', 'ecoprobm']),
+            '에코프로': ('086520', ['에코프로', 'ecopro'])
+        }
+        
+        # 충돌 가능한 회사들 먼저 체크
+        for company_name, (ticker, keywords) in conflicting_companies.items():
+            for keyword in keywords:
+                if keyword in message_lower:
+                    # 더 구체적인 이름이 포함되어 있는지 확인
+                    if company_name == '에코프로' and '에코프로비엠' in message_lower:
+                        continue  # 에코프로비엠이 있으면 에코프로는 건너뜀
+                    
+                    result = session.execute(text("""
+                        SELECT ticker, corp_name 
+                        FROM company_info 
+                        WHERE ticker = :ticker
+                    """), {"ticker": ticker}).fetchone()
+                    
+                    if result:
+                        tickers.append(result[0])
+                        logger.info(f"🎯 충돌 회사 매핑: {result[1]} ({result[0]})")
+                        break
+        
+        # 충돌하지 않는 일반 회사들 처리
+        if not tickers:  # 충돌 회사에서 못 찾은 경우
+            # 키워드를 길이 순으로 정렬 (긴 것 우선)
+            sorted_mappings = sorted(direct_mappings.items(), key=lambda x: len(x[0]), reverse=True)
+            
+            for keyword, ticker in sorted_mappings:
+                # 이미 충돌 처리된 회사는 건너뜀
+                if keyword in ['에코프로비엠', 'ecoprobm', '에코프로', 'ecopro']:
+                    continue
+                    
+                if keyword in message_lower:
+                    logger.info(f"🎯 일반 매핑: '{keyword}' -> {ticker}")
+                    
+                    result = session.execute(text("""
+                        SELECT ticker, corp_name 
+                        FROM company_info 
+                        WHERE ticker = :ticker
+                    """), {"ticker": ticker}).fetchone()
+                    
+                    if result and result[0] not in tickers:
+                        tickers.append(result[0])
+                        logger.info(f"🎯 직접 매핑: {result[1]} ({result[0]})")
+        
+        # 직접 매핑으로 찾은 것이 있으면 반환
+        if tickers:
+            return list(set(tickers))  # 중복 제거
         
         logger.warning(f"🚫 직접 매핑 실패: '{message_lower}'에서 알려진 회사 없음")
         

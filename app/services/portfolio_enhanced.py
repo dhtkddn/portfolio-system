@@ -8,6 +8,7 @@ from sqlalchemy import text
 
 from app.schemas import PortfolioInput
 from app.services.stock_database import StockDatabase
+# from app.services.financial_comparison import financial_comparison_service  # matplotlib 의존성으로 인해 주석처리
 from app.services.investor_protection import (
     InvestorProtectionService, 
     InvestorProfile, 
@@ -202,7 +203,7 @@ class EnhancedStockScreener:
             return pd.DataFrame()
     
     def apply_user_profile_filter(self, stocks_df: pd.DataFrame, user_profile: PortfolioInput, risk_profile_5: RiskProfileType = None) -> List[str]:
-        """사용자 프로필과 섹터 기반 종목 필터링"""
+        """사용자 프로필과 섹터 기반 종목 필터링 + 재무제표 스크리닝"""
         
         if stocks_df.empty:
             return []
@@ -232,6 +233,9 @@ class EnhancedStockScreener:
         # 섹터 우선순위로 정렬
         filtered = pd.concat([sector_stocks, other_stocks])
         
+        # 재무제표 기반 추가 스크리닝
+        financial_filtered = self._apply_financial_screening(filtered, risk_profile_5)
+        
         # 종목 수 결정 (위험성향에 따라)
         if risk_profile_5 in [RiskProfileType.STABLE, RiskProfileType.STABILITY_SEEKING]:
             max_stocks = 8  # 집중도 낮춤
@@ -241,14 +245,145 @@ class EnhancedStockScreener:
             max_stocks = 15  # 더 많은 종목 허용
         
         # 최종 선별
-        selected_tickers = filtered.head(max_stocks)['ticker'].tolist()
+        selected_tickers = financial_filtered.head(max_stocks)['ticker'].tolist()
         
         logger.info(f"🎯 5단계 위험성향 기반 선별: {risk_profile_5.value}")
-        logger.info(f"📊 최종 선별: {len(selected_tickers)}개 종목")
+        logger.info(f"📊 재무제표 스크리닝 후: {len(financial_filtered)}개 → 최종 선별: {len(selected_tickers)}개")
         if selected_tickers:
             logger.info(f"종목: {selected_tickers[:5]}...")
         
         return selected_tickers
+    
+    def _apply_financial_screening(self, stocks_df: pd.DataFrame, risk_profile_5: RiskProfileType) -> pd.DataFrame:
+        """위험성향별 재무제표 기반 스크리닝"""
+        
+        try:
+            # 재무 데이터 조회 쿼리
+            financial_query = """
+                SELECT DISTINCT
+                    f.ticker,
+                    f.매출액 / 100000000 as revenue_billions,
+                    f.영업이익 / 100000000 as operating_profit_billions,
+                    f.당기순이익 / 100000000 as net_profit_billions,
+                    CASE 
+                        WHEN f.매출액 > 0 THEN (f.영업이익 / f.매출액 * 100)
+                        ELSE 0 
+                    END as operating_margin,
+                    CASE 
+                        WHEN f.매출액 > 0 THEN (f.당기순이익 / f.매출액 * 100)
+                        ELSE 0 
+                    END as net_margin,
+                    f.year
+                FROM financials f
+                WHERE f.ticker IN ({})
+                AND f.year = (SELECT MAX(year) FROM financials WHERE ticker = f.ticker)
+                AND f.매출액 IS NOT NULL
+                AND f.영업이익 IS NOT NULL
+                AND f.당기순이익 IS NOT NULL
+            """.format(','.join([f"'{t}'" for t in stocks_df['ticker'].tolist()]))
+            
+            financial_df = pd.read_sql(financial_query, self.session.get_bind())
+            
+            if financial_df.empty:
+                logger.warning("재무 데이터 없음 - 기본 필터링만 적용")
+                return stocks_df
+            
+            # 위험성향별 재무 기준 적용
+            if risk_profile_5 == RiskProfileType.STABLE:
+                # 안정형: 매출 1000억 이상, 영업이익률 5% 이상, 적자 제외
+                criteria = (
+                    (financial_df['revenue_billions'] >= 10) &
+                    (financial_df['operating_margin'] >= 5.0) &
+                    (financial_df['net_profit_billions'] > 0)
+                )
+                
+            elif risk_profile_5 == RiskProfileType.STABILITY_SEEKING:
+                # 안정추구형: 매출 500억 이상, 영업이익률 3% 이상
+                criteria = (
+                    (financial_df['revenue_billions'] >= 5) &
+                    (financial_df['operating_margin'] >= 3.0) &
+                    (financial_df['net_profit_billions'] > 0)
+                )
+                
+            elif risk_profile_5 == RiskProfileType.RISK_NEUTRAL:
+                # 위험중립형: 매출 100억 이상, 영업이익률 0% 이상
+                criteria = (
+                    (financial_df['revenue_billions'] >= 1) &
+                    (financial_df['operating_margin'] >= 0)
+                )
+                
+            elif risk_profile_5 == RiskProfileType.ACTIVE_INVESTMENT:
+                # 적극투자형: 성장성 중시, 영업이익률 -5% 이상
+                criteria = (
+                    (financial_df['revenue_billions'] >= 0.5) &
+                    (financial_df['operating_margin'] >= -5.0)
+                )
+                
+            else:  # AGGRESSIVE
+                # 공격투자형: 모든 종목 허용 (혁신기업 포함)
+                criteria = financial_df['ticker'].notna()
+            
+            # 기준을 만족하는 종목만 필터링
+            qualified_tickers = financial_df[criteria]['ticker'].tolist()
+            financial_filtered = stocks_df[stocks_df['ticker'].isin(qualified_tickers)]
+            
+            # 재무 지표별 점수화 및 정렬
+            scored_df = self._score_financial_metrics(financial_filtered, financial_df, risk_profile_5)
+            
+            logger.info(f"💰 재무제표 스크리닝: {len(stocks_df)} → {len(scored_df)}개 종목")
+            return scored_df
+            
+        except Exception as e:
+            logger.error(f"재무제표 스크리닝 실패: {e}")
+            return stocks_df
+    
+    def _score_financial_metrics(self, stocks_df: pd.DataFrame, financial_df: pd.DataFrame, risk_profile_5: RiskProfileType) -> pd.DataFrame:
+        """재무 지표 기반 점수화 및 정렬"""
+        
+        try:
+            # 재무 데이터를 stocks_df에 병합
+            merged_df = stocks_df.merge(financial_df, on='ticker', how='left')
+            
+            # 위험성향별 가중치 설정
+            if risk_profile_5 in [RiskProfileType.STABLE, RiskProfileType.STABILITY_SEEKING]:
+                # 안전성 중시: 수익성 > 규모 > 성장성
+                weights = {'profitability': 0.5, 'stability': 0.3, 'growth': 0.2}
+            elif risk_profile_5 == RiskProfileType.RISK_NEUTRAL:
+                # 균형: 모든 지표 균등
+                weights = {'profitability': 0.4, 'stability': 0.3, 'growth': 0.3}
+            else:
+                # 성장성 중시: 성장성 > 수익성 > 안정성
+                weights = {'profitability': 0.3, 'stability': 0.2, 'growth': 0.5}
+            
+            # 점수 계산 - 안전한 처리
+            merged_df['profitability_score'] = (
+                merged_df['operating_margin'].fillna(0).astype(float) * 0.6 +
+                merged_df['net_margin'].fillna(0).astype(float) * 0.4
+            ).clip(0, 100)
+            
+            merged_df['stability_score'] = (
+                merged_df['revenue_billions'].fillna(0).astype(float).apply(lambda x: min(x/100, 1) * 100)
+            )
+            
+            # 성장성 점수 (단순화: 영업이익률 기준)
+            merged_df['growth_score'] = merged_df['operating_margin'].fillna(0).astype(float).clip(0, 50) * 2
+            
+            # 종합 점수
+            merged_df['total_score'] = (
+                merged_df['profitability_score'].fillna(0) * weights['profitability'] +
+                merged_df['stability_score'].fillna(0) * weights['stability'] +
+                merged_df['growth_score'].fillna(0) * weights['growth']
+            )
+            
+            # 점수순 정렬
+            result_df = merged_df.sort_values('total_score', ascending=False)
+            
+            # 원본 컬럼만 반환
+            return result_df[stocks_df.columns]
+            
+        except Exception as e:
+            logger.error(f"재무 점수화 실패: {e}")
+            return stocks_df
     
     def close(self):
         if self.session:
@@ -298,9 +433,51 @@ class SmartPortfolioAnalysisService:
             
             weights, performance = optimizer.optimize()
             
+            # 위험성향별 단일 종목 한도 강제 적용
+            guideline = AssetAllocationGuideline.GUIDELINES[self.risk_profile_5]
+            max_single_stock = (guideline["max_single_stock"] - 0.5) / 100.0  # 0.5% 여유분으로 확실하게
+            
+            # 한도 초과 종목 조정 - 더 강력한 방법
+            adjusted_weights = {}
+            excess_weight = 0
+            
+            # 1차: 한도 초과 종목을 한도까지 줄이고 초과분 계산
+            for ticker, weight in weights.items():
+                if weight > max_single_stock:
+                    adjusted_weights[ticker] = max_single_stock
+                    excess_weight += weight - max_single_stock
+                else:
+                    adjusted_weights[ticker] = weight
+            
+            # 2차: 초과분을 한도 미달 종목에 분배
+            if excess_weight > 0:
+                under_limit_tickers = [t for t, w in adjusted_weights.items() if w < max_single_stock]
+                if under_limit_tickers:
+                    additional_weight = excess_weight / len(under_limit_tickers)
+                    for ticker in under_limit_tickers:
+                        new_weight = adjusted_weights[ticker] + additional_weight
+                        if new_weight > max_single_stock:
+                            adjusted_weights[ticker] = max_single_stock
+                        else:
+                            adjusted_weights[ticker] = new_weight
+            
+            # 비중 재정규화
+            total_weight = sum(adjusted_weights.values())
+            if total_weight > 0:
+                final_weights = {k: v/total_weight for k, v in adjusted_weights.items()}
+            else:
+                final_weights = weights
+            
+            # 성과 지표 안전 처리
+            safe_performance = (
+                performance[0] if performance[0] is not None else 0.0,
+                performance[1] if performance[1] is not None else 0.0,
+                performance[2] if performance[2] is not None else 0.0
+            )
+            
             # 6. 결과 구성
             return self._build_analysis_result(
-                weights, performance, selected_tickers, stocks_df, market_filter
+                final_weights, safe_performance, selected_tickers, stocks_df, market_filter
             )
             
         except Exception as e:
@@ -315,9 +492,9 @@ class SmartPortfolioAnalysisService:
         
         if self.risk_profile_5 in [RiskProfileType.STABLE, RiskProfileType.STABILITY_SEEKING]:
             return OptimizationMode.CONSERVATIVE
-        elif self.risk_profile_5 == RiskProfileType.RISK_NEUTRAL:
+        elif self.risk_profile_5 in [RiskProfileType.RISK_NEUTRAL, RiskProfileType.ACTIVE_INVESTMENT]:
             return OptimizationMode.PRACTICAL
-        else:  # ACTIVE_INVESTMENT, AGGRESSIVE
+        else:  # AGGRESSIVE
             return OptimizationMode.MATHEMATICAL
     
     def _build_analysis_result(self, weights, performance, tickers, stocks_df, market_filter):
@@ -330,7 +507,8 @@ class SmartPortfolioAnalysisService:
         detailed_weights = {}
         
         for ticker_yf, weight in weights.items():
-            if weight > 0.001:
+            # None 체크 및 안전한 처리
+            if weight is not None and weight > 0.001:
                 ticker = ticker_yf.replace('.KS', '').replace('.KQ', '')
                 
                 # DB에서 조회한 실제 정보 사용
@@ -340,7 +518,7 @@ class SmartPortfolioAnalysisService:
                     stock_row = stock_info.iloc[0]
                     detailed_weights[ticker_yf] = {
                         "name": stock_row['name'],
-                        "weight": weight,
+                        "weight": float(weight),  # 명시적 형변환
                         "sector": stock_row['sector'],
                         "market": stock_row['market'],
                         "revenue": float(stock_row['revenue']) if pd.notna(stock_row['revenue']) else None,
@@ -359,13 +537,16 @@ class SmartPortfolioAnalysisService:
         risk_level = self.protection_service.calculate_portfolio_risk_level(volatility)
         
         # 투자자 프로필 생성 (실제로는 사용자 입력 받아야 함)
+        # investment_amount가 None일 경우 initial_capital 사용
+        investment_amount = self.user_input.investment_amount or self.user_input.initial_capital
+        
         investor_profile = InvestorProfile(
             age=40,  # 예시값
             investment_experience="3-5년",
             investment_goal="장기성장",
             risk_tolerance=self.user_input.risk_appetite,
-            investment_amount=self.user_input.investment_amount,
-            total_assets=self.user_input.investment_amount * 3,  # 예시값
+            investment_amount=investment_amount,
+            total_assets=investment_amount * 3,  # 예시값
             income_level=100000000,  # 예시값
             investment_ratio=0.33
         )
@@ -420,7 +601,7 @@ class SmartPortfolioAnalysisService:
                 },
                 "compliance_check": {
                     "within_sector_guidelines": self._check_sector_compliance(detailed_weights, guideline),
-                    "single_stock_limit_compliance": max([info["weight"] for info in detailed_weights.values()]) <= guideline["max_single_stock"]/100 if detailed_weights else True
+                    "single_stock_limit_compliance": max([info["weight"] for info in detailed_weights.values()]) <= (guideline.get("max_single_stock", 20)/100) if detailed_weights else True
                 }
             },
             "portfolio_stats": {
@@ -451,7 +632,7 @@ class SmartPortfolioAnalysisService:
     def _calculate_sector_distribution(self, detailed_weights):
         """섹터 분포 계산"""
         sectors = {}
-        for ticker_name, info in detailed_weights.items():
+        for ticker, info in detailed_weights.items():
             sector = info["sector"]
             if sector in sectors:
                 sectors[sector] += info["weight"]
@@ -467,7 +648,7 @@ class SmartPortfolioAnalysisService:
         suitable_sectors = guideline["suitable_sectors"]
         total_suitable_weight = 0
         
-        for ticker_name, info in detailed_weights.items():
+        for ticker, info in detailed_weights.items():
             if info["sector"] in suitable_sectors:
                 total_suitable_weight += info["weight"]
         

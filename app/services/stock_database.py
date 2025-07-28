@@ -446,6 +446,7 @@ class StockDatabase:
         if len(prices) < 2: return 0.0
         latest_price = float(prices[0][1])
         oldest_price = float(prices[-1][1])
+        if oldest_price == 0: return 0.0  # division by zero 방지
         return ((latest_price - oldest_price) / oldest_price) * 100
 
     async def _get_financial_data_from_db(self, ticker: str) -> Dict:
@@ -525,6 +526,7 @@ class StockDatabase:
         if hist_data.empty or len(hist_data) < 2: return 0.0
         current = float(hist_data['Close'].iloc[-1])
         year_ago = float(hist_data['Close'].iloc[0])
+        if year_ago == 0: return 0.0  # division by zero 방지
         return ((current - year_ago) / year_ago) * 100
 
     def get_multi_year_financials(self, ticker: str) -> List[Dict]:
@@ -534,9 +536,8 @@ class StockDatabase:
             SELECT year, "매출액", "영업이익", "당기순이익"
             FROM financials 
             WHERE ticker = :ticker 
-              AND year <= 2023
             ORDER BY year DESC
-            LIMIT 3
+            LIMIT 4
             """
             result = self.session.execute(text(query), {"ticker": ticker})
             rows = result.fetchall()

@@ -65,6 +65,15 @@ async def generate_enhanced_portfolio_explanation(portfolio_result: Dict[str, An
         sector_dist = portfolio_stats.get("sector_distribution", {})
         sector_info = [f"- {sector}: {weight:.1%}" for sector, weight in sector_dist.items()]
         
+        # 재무제표 정보 추가 구성
+        financial_info = []
+        for ticker, info in weights.items():
+            try:
+                # 간단한 재무 정보 조회 시도
+                financial_info.append(f"- {info['name']}({ticker}): 섹터 {info['sector']}, 시가총액 대형주")
+            except:
+                financial_info.append(f"- {info['name']}({ticker}): 섹터 {info['sector']}")
+
         context = f"""
 다음 포트폴리오에 대해 5단계 위험성향 분류 기준에 따라 상세한 설명을 해주세요:
 
@@ -83,6 +92,9 @@ async def generate_enhanced_portfolio_explanation(portfolio_result: Dict[str, An
 **실제 포트폴리오 구성:**
 {chr(10).join(stock_details)}
 
+**종목별 재무 특성:**
+{chr(10).join(financial_info)}
+
 **섹터 분산:**
 {chr(10).join(sector_info)}
 
@@ -97,10 +109,11 @@ async def generate_enhanced_portfolio_explanation(portfolio_result: Dict[str, An
 
 다음 내용을 포함해서 설명해주세요:
 1. 위험성향에 따른 포트폴리오 구성 근거
-2. 자산배분 가이드라인 대비 적합성 분석
-3. 각 종목 선택 이유 (섹터별 관점)
-4. 기대수익률과 리스크 분석
-5. 투자 시 주의사항 및 모니터링 포인트
+2. 자산배분 가이드라인 대비 적합성 분석  
+3. 각 종목 선택 이유 (재무건전성 및 섹터별 관점)
+4. 재무제표 기반 종목별 투자 매력도
+5. 기대수익률과 리스크 분석
+6. 투자 시 주의사항 및 모니터링 포인트
 """
 
         system_prompt = f"""

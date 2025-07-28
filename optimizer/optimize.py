@@ -63,7 +63,7 @@ class PortfolioOptimizer:
         elif self.optimization_mode == OptimizationMode.PRACTICAL:
             # 실무적 제약조건
             return {
-                "max_single_weight": 0.4,      # 단일종목 최대 40%
+                "max_single_weight": 0.3,      # 단일종목 최대 30%
                 "min_positions": 3,            # 최소 3개 종목
                 "min_weight_threshold": 0.05,  # 5% 이상만 포함
                 "enforce_diversification": True,
@@ -181,13 +181,16 @@ class PortfolioOptimizer:
             ef = EfficientFrontier(mu, cov)
             
             # 최적화 방식별 제약조건 적용
-            if self.optimization_mode != OptimizationMode.MATHEMATICAL:
-                # 단일 종목 최대 비중 제한
-                max_weight = self.constraints["max_single_weight"]
-                ef.add_constraint(lambda w: w <= max_weight)
+            max_weight = self.constraints["max_single_weight"]
+            
+            # 단일 종목 최대 비중 제한 (모든 모드에 적용)
+            if max_weight < 1.0:
+                # 각 종목의 비중이 max_weight 이하가 되도록 제약
+                for i in range(len(ef.tickers)):
+                    ef.add_constraint(lambda w, i=i: w[i] <= max_weight)
                 
-                # 최소 비중 제한 (너무 작은 비중 제거)
-                min_weight = self.constraints["min_weight_threshold"]
+            # 최소 비중 제한 (너무 작은 비중 제거)
+            min_weight = self.constraints["min_weight_threshold"]
                 
             # 최적화 실행
             raw_weights = ef.max_sharpe(risk_free_rate=self.risk_free_rate)
@@ -217,29 +220,30 @@ class PortfolioOptimizer:
         
         # 최소 종목 수 확인
         active_positions = {k: v for k, v in weights.items() if v > 0}
+        
+        # 단일 종목 한도 강제 적용
+        max_weight = self.constraints["max_single_weight"]
+        adjusted_weights = {}
+        
+        for ticker, weight in active_positions.items():
+            if weight > max_weight:
+                adjusted_weights[ticker] = max_weight
+            else:
+                adjusted_weights[ticker] = weight
+        
+        # 비중 재정규화
+        total_weight = sum(adjusted_weights.values())
+        if total_weight > 0:
+            normalized_weights = {k: v/total_weight for k, v in adjusted_weights.items()}
+        else:
+            normalized_weights = adjusted_weights
+            
+        # 최소 종목 수 확인
         min_positions = self.constraints["min_positions"]
-        
-        if len(active_positions) < min_positions:
-            logger.warning(f"최소 종목 수 부족: {len(active_positions)} < {min_positions}")
+        if len(normalized_weights) < min_positions:
+            logger.warning(f"최소 종목 수 부족: {len(normalized_weights)} < {min_positions}")
             
-            # 추가 종목들에 최소 비중 할당
-            remaining_tickers = [t for t in self.tickers if t not in active_positions.keys()]
-            additional_needed = min_positions - len(active_positions)
-            
-            if len(remaining_tickers) >= additional_needed:
-                # 기존 비중을 줄여서 추가 종목에 할당
-                scale_factor = 0.8  # 기존 비중을 80%로 축소
-                scaled_weights = {k: v * scale_factor for k, v in active_positions.items()}
-                
-                remaining_weight = 1.0 - sum(scaled_weights.values())
-                additional_weight = remaining_weight / additional_needed
-                
-                for ticker in remaining_tickers[:additional_needed]:
-                    scaled_weights[ticker] = additional_weight
-                
-                weights = scaled_weights
-        
-        return weights
+        return normalized_weights
 
     def get_optimization_comparison(self) -> Dict:
         """여러 최적화 방식의 결과를 비교"""
